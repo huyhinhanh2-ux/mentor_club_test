@@ -79,8 +79,24 @@ async function downloadMedia(tk, fileToken, out) {
 async function fbFetch(u,o){ const r=await fetch(u,o); const t=await r.text(); let j; try{j=JSON.parse(t)}catch{j={_raw:t}}
   if(!r.ok||j.error)throw new Error('FB '+r.status+': '+JSON.stringify(j.error||j._raw||j)); return j; }
 
-// Đăng feed nhiều ảnh: upload từng ảnh (published=false) → media_fbid → tạo post /feed đính kèm.
+// Đăng feed ẢNH — vá New Page Experience:
+//  • 1 ảnh  → POST /{page}/photos (published mặc định=true) → HIỆN TRÊN FEED (không rơi vào album).
+//  • ≥2 ảnh → upload published=false → media_fbid → /feed attached_media (bài nhiều ảnh chính thức).
+// Luôn lấy permalink THẬT (permalink_url) vì link facebook.com/{pageID}_{postID} không mở được trên NPE.
 async function postPhotos(pageId, token, files, caption) {
+  const realPermalink = async (objectId) => {
+    let permalink=`https://www.facebook.com/${objectId}`;
+    try{ const st=await fbFetch(`${GRAPH}/${objectId}?fields=permalink_url&access_token=${encodeURIComponent(token)}`,{method:'GET'});
+      if(st.permalink_url) permalink=st.permalink_url.startsWith('/')?'https://www.facebook.com'+st.permalink_url:st.permalink_url; }catch{}
+    return permalink;
+  };
+  if (files.length === 1) {
+    const f=files[0]; const fd=new FormData(); fd.set('access_token',token); if(caption)fd.set('caption',caption);
+    fd.set('source', new Blob([fs.readFileSync(f.path)]), f.name||'photo.jpg');
+    const j=await fbFetch(`${GRAPH}/${pageId}/photos`,{method:'POST',body:fd});
+    const objectId=j.post_id||j.id; if(!objectId) throw new Error('upload ảnh không có id');
+    return { objectId, permalink: await realPermalink(objectId) };
+  }
   const fbids=[];
   for (const f of files) {
     const fd=new FormData(); fd.set('access_token',token); fd.set('published','false');
@@ -91,7 +107,7 @@ async function postPhotos(pageId, token, files, caption) {
   const body=new URLSearchParams(); body.set('access_token',token); if(caption)body.set('message',caption);
   fbids.forEach((id,i)=>body.set(`attached_media[${i}]`, JSON.stringify({media_fbid:id})));
   const post=await fbFetch(`${GRAPH}/${pageId}/feed`,{method:'POST',body});
-  return { objectId:post.id, permalink:`https://www.facebook.com/${post.id}` };
+  return { objectId:post.id, permalink: await realPermalink(post.id) };
 }
 async function postVideo(pageId, token, file, caption) {
   const fd=new FormData(); fd.set('access_token',token); if(caption)fd.set('description',caption);
