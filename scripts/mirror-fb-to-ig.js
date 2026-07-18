@@ -17,9 +17,10 @@
  * • Phạm vi: CHỈ 2 Page — Bầu (BAU_PAGE_ID) và Newborn (NEWBORN_PAGE_ID). Page khác bỏ qua.
  * • Loại đủ điều kiện: cột "Loại nội dung" bắt đầu bằng "reel…" HOẶC = "post ảnh sản phẩm".
  * • Cả 2 Page đăng CHUNG 1 tài khoản IG (IG_ACCOUNT_REC — dòng @thoministudio ở 22.1).
- * • Giãn giờ: trong 1 đợt quét, nếu CÓ CẢ Bầu lẫn Newborn cùng sẵn sàng →
- *       Bầu đăng NGAY, Newborn đăng SAU 30 phút (STAGGER_MINUTES).
- *       Newborn đứng một mình (không có Bầu cùng đợt) → đăng ngay.
+ * • Giãn giờ: MỌI bài cách nhau đúng 30 phút (STAGGER_MINUTES), thứ tự **Bầu TRƯỚC, Newborn SAU**.
+ *       Bài 1 đăng ngay, bài 2 sau 30', bài 3 sau 60'… (vd 1 Bầu + 1 Newborn → 10:00 và 10:30).
+ *       Chuỗi giờ NỐI TIẾP cả các bài đã xếp ở lượt cron trước (đọc "Lịch đăng bài" trong 22.2),
+ *       nên chạy cron 10 phút/lần cũng không bao giờ đăng chồng lên nhau.
  * • Bài cũ đã đánh "Bỏ qua (bài cũ)" ở cột IG Trạng thái → không đụng tới.
  * =====================================================================================
  *
@@ -254,16 +255,29 @@ function ig22Type(loai, loaiND, atts){
 
   if(!cand.length){ log(`Xong. Sync: ${synced}. Không có bài mới đủ điều kiện để xếp hàng.`); return; }
 
-  const hasBau     = cand.some(c=>c.label==='bau');
-  const hasNewborn = cand.some(c=>c.label==='newborn');
-  log(`Ứng viên: ${cand.length} (Bầu ${cand.filter(c=>c.label==='bau').length}, Newborn ${cand.filter(c=>c.label==='newborn').length}). Giãn giờ: ${hasBau&&hasNewborn?('Newborn +'+CFG.STAGGER+'’'):'không (chỉ 1 nhóm)'}.`);
+  // Thứ tự: Bầu TRƯỚC, Newborn SAU (trong cùng nhóm giữ nguyên thứ tự bảng).
+  cand.sort((a,b)=> (a.label==='bau'?0:1) - (b.label==='bau'?0:1));
+
+  const STEP = CFG.STAGGER*60*1000;
+  // Chuỗi giờ phải NỐI TIẾP các bài đã xếp/đăng gần đây trong 22.2 (chống đăng chồng giữa các lượt cron).
+  const igRows = await listAll(tk, CFG.IG_TABLE);
+  let lastSlot = null;
+  for(const r of igRows){
+    const s = r.fields[F22.schedule];
+    const ms = typeof s==='number' ? s : (s ? Date.parse(plain(s)) : NaN);
+    if(!isNaN(ms) && ms >= T - STEP && (lastSlot===null || ms > lastSlot)) lastSlot = ms;
+  }
+  let nextSlot = (lastSlot!==null) ? lastSlot + STEP : T;
+  if(nextSlot < T) nextSlot = T;
+
+  log(`Ứng viên: ${cand.length} (Bầu ${cand.filter(c=>c.label==='bau').length}, Newborn ${cand.filter(c=>c.label==='newborn').length}). Giãn ${CFG.STAGGER}’/bài, Bầu trước. Slot đầu: ${new Date(nextSlot).toISOString().slice(11,16)}${lastSlot!==null?' (nối tiếp bài đã xếp)':''}.`);
 
   let enq=0;
   for(const c of cand){
     if(enq>=CFG.MAX_ENQ){ log(`  … dừng ở trần MAX_ENQUEUE=${CFG.MAX_ENQ}, phần còn lại để lần chạy sau.`); break; }
     const f=c.row.fields;
-    // Luật giãn: Newborn +30' CHỈ khi cùng đợt có Bầu; các trường hợp khác đăng ngay.
-    const due = (c.label==='newborn' && hasBau && hasNewborn) ? (T + CFG.STAGGER*60*1000) : T;
+    // Luật giãn: mỗi bài một slot, cách nhau STAGGER phút (Bầu trước, Newborn sau).
+    const due = nextSlot; nextSlot += STEP;
     const caption=plain(f[F14.caption]);
     const tags=plain(f[F14.hashtag]).trim();
     const type22=ig22Type(plain(f[F14.loai]), plain(f[F14.loaiND]), c.atts);
