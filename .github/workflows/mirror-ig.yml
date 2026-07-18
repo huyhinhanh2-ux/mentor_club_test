@@ -1,0 +1,56 @@
+# TỰ ĐỘNG ĐĂNG CHÉO FACEBOOK → INSTAGRAM — quét mỗi 10 phút.
+#
+# 2 bước chạy nối tiếp trong 1 lần:
+#   B1 mirror-fb-to-ig.js : tìm bài 14.3 đã ĐĂNG FB THÀNH CÔNG + đúng loại (reel / post ảnh sản phẩm)
+#                           + đúng Page (Bầu / Newborn) → XẾP HÀNG sang bảng 22.2, gán "Lịch đăng bài"
+#                           theo luật giãn giờ (cùng đợt có Bầu+Newborn → Newborn +30'). Đồng thời SYNC
+#                           kết quả IG của đợt trước về cột IG Trạng thái / IG Link / IG Log ở 14.3.
+#   B2 post-instagram-api.js : đăng các dòng 22.2 ĐÃ TỚI GIỜ HẸN lên Instagram, ghi kết quả về 22.2.
+#
+# Cả 2 Page đăng CHUNG 1 tài khoản IG (@thoministudio) — cấu hình ở bảng 22.1.
+# GitHub cron có thể trễ 5–30' lúc tải cao ⇒ Newborn có thể lên trong khoảng T+30…T+40'. Chấp nhận được.
+name: mirror-ig
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Không cho 2 lần chạy chồng nhau (tránh xếp hàng / đăng trùng).
+concurrency:
+  group: mirror-ig
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: B1 — Mirror FB→IG (xếp hàng 22.2 + sync ngược 14.3)
+        env:
+          LARK_APP_SECRET:   ${{ secrets.LARK_APP_SECRET }}
+          LARK_APP_ID:       ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:    ${{ vars.LARK_BASE_ID }}
+          # Table ID KHÔNG phải bí mật → nhúng mặc định để khỏi phải khai Variable (vẫn cho vars ghi đè).
+          FB_POSTS_TABLE:    ${{ vars.TABLE_DANGBAI || 'tblC80uwemNeY9s1' }}    # bảng 14.3
+          IG_POSTS_TABLE:    ${{ vars.TABLE_IG_POST || 'tblVD7RqIPRA0TBb' }}    # bảng 22.2
+          IG_ACCOUNTS_TABLE: ${{ vars.TABLE_IG_ACC  || 'tblbhKs26gYjxEI5' }}    # bảng 22.1
+          # Tùy chọn (có mặc định trong code): IG_ACCOUNT_REC, BAU_PAGE_ID, NEWBORN_PAGE_ID, STAGGER_MINUTES
+          BAU_PAGE_ID:       ${{ vars.BAU_PAGE_ID || '252437297948793' }}
+          NEWBORN_PAGE_ID:   ${{ vars.NEWBORN_PAGE_ID || '107291022310921' }}
+          STAGGER_MINUTES:   ${{ vars.IG_STAGGER_MINUTES || '30' }}
+        run: node scripts/mirror-fb-to-ig.js
+
+      - name: B2 — Đăng các dòng 22.2 đã tới giờ (post-instagram-api.js)
+        env:
+          LARK_APP_SECRET:   ${{ secrets.LARK_APP_SECRET }}
+          LARK_APP_ID:       ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:    ${{ vars.LARK_BASE_ID }}
+          IG_ACCOUNTS_TABLE: ${{ vars.TABLE_IG_ACC  || 'tblbhKs26gYjxEI5' }}    # bảng 22.1
+          IG_POSTS_TABLE:    ${{ vars.TABLE_IG_POST || 'tblVD7RqIPRA0TBb' }}    # bảng 22.2
+          MAX_POSTS:         ${{ vars.IG_MAX_POSTS || '10' }}
+        run: node scripts/post-instagram-api.js
