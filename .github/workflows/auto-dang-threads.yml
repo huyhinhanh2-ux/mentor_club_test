@@ -1,0 +1,59 @@
+# TỰ ĐỘNG ĐĂNG THREADS THEO LỊCH — quét bảng 23.3 mỗi 15 phút, đăng các dòng đã tới
+# giờ ở cột "Lịch đăng bài". KHÔNG cần bấm nút, KHÔNG cần bật máy tính.
+#
+# Song sinh với auto-dang-lich.yml (Facebook). Khác biệt duy nhất: engine + bảng.
+#
+# ⏰ MÚI GIỜ — ĐỌC KỸ, ĐỪNG "SỬA" CÁI ĐANG ĐÚNG:
+#    Cột "Lịch đăng bài" kiểu Ngày giờ → Lark trả về MỐC THỜI GIAN TUYỆT ĐỐI (số ms).
+#    scheduleMs() bắt `typeof cell === 'number'` và trả thẳng, KHÔNG đụng múi giờ.
+#    Đem so với Date.now() cũng tuyệt đối ⇒ máy chủ ở UTC hay VN đều ra cùng kết quả.
+#    ⚠️ Log của GitHub in giờ UTC (= giờ VN trừ 7). Bài hẹn 8h sáng sẽ hiện log là 01:00.
+#       ĐÓ LÀ CÁCH IN, KHÔNG PHẢI LỖI. Ai cộng thêm 7 tiếng vào code để "cho khớp mắt"
+#       sẽ tạo ra lệch 7 tiếng THẬT. Muốn xem giờ VN thì nhìn cột "Đăng lúc" trong Lark.
+#    ⚠️ Điều kiện duy nhất: cột "Lịch đăng bài" phải giữ kiểu NGÀY GIỜ. Đổi sang Văn bản là lệch.
+#
+# ⏱️ ĐỘ TRỄ: GitHub cron trễ 5–30 phút lúc tải cao. Bài hẹn 8:00 thực lên khoảng 8:03–8:20.
+#    Muốn sát giờ hơn thì hẹn sớm 10 phút (điền 7:50 nếu muốn lên 8:00) — không cần sửa code.
+#
+# 💤 GitHub TẮT cron nếu repo không có commit mới trong 60 ngày, và không báo gì.
+#    Mỗi 1–2 tháng sửa nhẹ file bất kỳ rồi commit là reset đồng hồ.
+name: auto-dang-threads
+
+on:
+  schedule:
+    # 15 phút/lần, lệch pha khỏi :00/:15/:30/:45 để né giờ tắc nghẽn của GitHub
+    # VÀ để không nổ cùng lúc với auto-dang-lich.yml (Facebook, đang chạy */15).
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+# Không cho 2 lượt chạy chồng nhau (nút bấm + cron) → tránh đăng trùng.
+# Xếp hàng chờ, KHÔNG hủy giữa chừng (video Threads có thể mất tới 2 phút).
+# Nhóm này phải TRÙNG TÊN với nhóm trong dang-threads.yml.
+concurrency:
+  group: dang-threads
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Dang Threads toi gio hen (post-threads-api.js)
+        env:
+          # ---- Bí mật (Settings → Secrets) ----
+          LARK_APP_SECRET:   ${{ secrets.LARK_APP_SECRET }}
+          # TÙY CHỌN — để AI viết lại bài >500 ký tự cho vừa Threads mà giữ nguyên ý.
+          # Không khai → engine tự cắt ở ranh giới câu, ghi cảnh báo vào cột Log.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # ---- Cấu hình (Settings → Variables) ----
+          LARK_APP_ID:       ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:    ${{ vars.LARK_BASE_ID }}
+          TH_ACCOUNTS_TABLE: ${{ vars.TABLE_TH_ACC  || 'tblrsjSPGS7DVPED' }}   # bảng 23.2
+          TH_POSTS_TABLE:    ${{ vars.TABLE_TH_POST || 'tbl3N6ki0goOi1e2' }}   # bảng 23.3
+          IG_ACCOUNTS_TABLE: ${{ vars.TABLE_IG_ACC }}   # bảng 22.1 — chỉ cần khi bài CÓ ảnh/video
+          MAX_POSTS:         ${{ vars.TH_MAX_POSTS || '5' }}   # trần chống spam mỗi lượt
+          # KHÔNG truyền RECORD_ID ⇒ quét cả bảng theo lịch (đây là điểm khác nút bấm).
+        run: node scripts/post-threads-api.js

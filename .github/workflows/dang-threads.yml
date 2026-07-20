@@ -1,0 +1,58 @@
+# ĐĂNG THREADS — kích hoạt bằng nút "Đăng" trong bảng 23.3 (Lark Base).
+#   POST https://api.github.com/repos/<user>/<repo>/dispatches
+#   body: {"event_type":"dang-threads","client_payload":{"record_id":"{{Record ID}}"}}
+#
+# BẢNG RIÊNG: 23.2 (tài khoản Threads) + 23.3 (đăng bài) — không dùng chung 14.x với Facebook.
+#
+# ⚠️ Threads có HỆ TOKEN RIÊNG (graph.threads.net). Token nằm ở cột access_token bảng 23.2,
+#    KHÔNG dùng chung token Facebook. Token sống 60 NGÀY — phải gia hạn TRƯỚC HẠN.
+# ⚠️ Bài CÓ ẢNH/VIDEO: dòng 23.2 phải nối tới tài khoản IG (22.1) để mượn CDN Facebook làm
+#    URL công khai (Threads không nhận upload file). Bài TOÀN CHỮ thì không cần gì cả.
+name: dang-threads
+
+on:
+  repository_dispatch:
+    types: [dang-threads]
+  workflow_dispatch:
+    inputs:
+      record_id:
+        description: 'Record ID của dòng cần đăng (để trống = quét cả bảng, tối đa MAX_POSTS bài/lần)'
+        required: false
+        type: string
+      max_posts:
+        description: '⚠️ Trần số bài mỗi lần chạy. Threads cho 250 bài/24h, nhưng đăng ồ ạt lô bài cũ dễ bị Meta coi là SPAM.'
+        required: false
+        default: '10'
+        type: string
+
+# Không cho nút bấm và cron (auto-dang-threads.yml) chạy chồng nhau → tránh đăng trùng.
+# Tên nhóm phải TRÙNG với nhóm trong auto-dang-threads.yml.
+concurrency:
+  group: dang-threads
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Đăng Threads (post-threads-api.js)
+        env:
+          # ---- Bí mật (GitHub → Settings → Secrets) ----
+          LARK_APP_SECRET:   ${{ secrets.LARK_APP_SECRET }}
+          # TÙY CHỌN — để AI viết lại bài >500 ký tự cho vừa Threads mà giữ nguyên ý.
+          # Không khai → engine tự cắt ở ranh giới câu, ghi cảnh báo vào cột Log.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # ---- Cấu hình (GitHub → Settings → Variables) ----
+          LARK_APP_ID:       ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:    ${{ vars.LARK_BASE_ID }}
+          TH_ACCOUNTS_TABLE: ${{ vars.TABLE_TH_ACC }}    # bảng 23.2
+          TH_POSTS_TABLE:    ${{ vars.TABLE_TH_POST }}   # bảng 23.3
+          IG_ACCOUNTS_TABLE: ${{ vars.TABLE_IG_ACC }}    # bảng 22.1 — mượn CDN Facebook cho ảnh/video
+          MAX_POSTS:         ${{ inputs.max_posts || vars.TH_MAX_POSTS || '10' }}
+          # Nút bấm Lark gửi client_payload.record_id; chạy tay thì lấy từ ô nhập.
+          RECORD_ID:         ${{ github.event.client_payload.record_id || inputs.record_id }}
+        run: node scripts/post-threads-api.js
