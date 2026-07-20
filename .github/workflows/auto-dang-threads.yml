@@ -53,7 +53,7 @@ jobs:
           LARK_APP_TOKEN:    ${{ vars.LARK_BASE_ID }}
           TH_ACCOUNTS_TABLE: ${{ vars.TABLE_TH_ACC  || 'tblrsjSPGS7DVPED' }}   # bảng 23.2
           TH_POSTS_TABLE:    ${{ vars.TABLE_TH_POST || 'tbl3N6ki0goOi1e2' }}   # bảng 23.3
-          IG_ACCOUNTS_TABLE: ${{ vars.TABLE_IG_ACC }}   # bảng 22.1 — chỉ cần khi bài CÓ ảnh/video
+          IG_ACCOUNTS_TABLE: ${{ vars.TABLE_IG_ACC || 'tblbhKs26gYjxEI5' }}   # bảng 22.1 — mượn CDN Facebook cho ảnh/video
           MAX_POSTS:         ${{ vars.TH_MAX_POSTS || '5' }}   # trần chống spam mỗi lượt
           # KHÔNG truyền RECORD_ID ⇒ quét cả bảng theo lịch (đây là điểm khác nút bấm).
         run: node scripts/post-threads-api.js
