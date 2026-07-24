@@ -193,6 +193,26 @@ async function cleanupTemp(pageToken, ids){
   for(const id of ids){ try{ await api(`${GRAPH}/${id}?access_token=${encodeURIComponent(pageToken)}`,{method:'DELETE'},'FB'); }catch{} }
 }
 
+/* ---------- Lấy access token ra khỏi một dòng Lark ----------
+ * ⚠️ ĐỪNG "đơn giản hoá" hàm này thành `Object.keys(f).find(k=>/token/i.test(k))`.
+ * Bảng 23.2 có cột **"Hạn token"** (ngày hết hạn) đứng TRƯỚC cột "access_token" trong
+ * thứ tự key mà Lark trả về. Regex /token/i lỏng sẽ bắt trúng "Hạn token" và gửi con số
+ * mốc thời gian (vd 1789732800000) đi làm access token ⇒ Threads trả về:
+ *     "Invalid OAuth access token - Cannot parse access token" (code 190)
+ * Đây chính là lỗi làm engine KHÔNG đăng nổi bài nào từ 13/07 tới 25/07/2026, và nó
+ * ngụy trang rất giỏi thành "token hết hạn" khiến người sửa đi lấy token mới vô ích.
+ * Luật: ưu tiên khớp CHÍNH XÁC tên cột, chỉ khi không có mới dò lỏng, và luôn loại
+ * các cột mang nghĩa ngày/hạn.
+ */
+function tokenOf(f){
+  const keys = Object.keys(f);
+  const pick = keys.find(k => /^access[_ ]?token$/i.test(k.trim()))
+            || keys.find(k => /token/i.test(k) && !/h[ạaà]n|expir|ng[àa]y|date|h[ếe]t/i.test(k));
+  if (!pick) return '';
+  const v = plain(f[pick]).trim();
+  return /^\d+$/.test(v) ? '' : v;   // toàn số ⇒ chắc chắn là mốc thời gian, không phải token
+}
+
 /* ---------- Threads ---------- */
 async function thContainer(userId, token, params){
   const j=await api(`${THREADS}/${userId}/threads`,{method:'POST',body:new URLSearchParams({...params, access_token:token})},'Threads');
@@ -319,7 +339,7 @@ async function postToThreads(acc, files, kind, text){
     for(const r of await listAll(tk, CFG.IG_TABLE)){
       const f=r.fields;
       const g=(re)=>{ const k=Object.keys(f).find(k=>re.test(k)); return k?plain(f[k]).trim():''; };
-      igMap.set(r.record_id, { pageId:g(/fanpage.*id/i), pageToken:g(/token/i) });
+      igMap.set(r.record_id, { pageId:g(/fanpage.*id/i), pageToken:tokenOf(f) });
     }
   }
   // 23.2 — tài khoản Threads
@@ -330,7 +350,7 @@ async function postToThreads(acc, files, kind, text){
     const ig=igMap.get(linkRecIds(f['Tài khoản IG'])[0]);
     accMap.set(r.record_id, {
       thId:    g(/threads.*user.*id/i),
-      thToken: g(/token/i),
+      thToken: tokenOf(f),
       name:    g(/^t[àa]i kho[ản]n Threads$|username/i) || '(Threads)',
       pageId:    ig?.pageId    || '',
       pageToken: ig?.pageToken || '',
