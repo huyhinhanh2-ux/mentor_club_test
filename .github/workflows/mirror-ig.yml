@@ -1,13 +1,24 @@
-# TỰ ĐỘNG ĐĂNG CHÉO FACEBOOK → INSTAGRAM — quét mỗi 10 phút.
+# TỰ ĐỘNG ĐĂNG CHÉO FACEBOOK → INSTAGRAM + THREADS — quét mỗi 10 phút.
 #
-# 2 bước chạy nối tiếp trong 1 lần:
+# TRIẾT LÝ (chốt với CEO 2026-07-25): CEO CHỈ ĐIỀN BẢNG 14.3. Instagram và Threads TỰ LẤY BÀI.
+# Không nút bấm riêng, không bảng phải gõ tay lần hai. Bảng 22.2 / 23.3 chỉ là HÀNG ĐỢI CỦA MÁY.
+#
+# 3 bước chạy nối tiếp trong 1 lần:
 #   B1 mirror-fb-to-ig.js : tìm bài 14.3 đã ĐĂNG FB THÀNH CÔNG + đúng loại (reel / post ảnh sản phẩm)
 #                           + đúng Page (Bầu / Newborn) → XẾP HÀNG sang bảng 22.2, gán "Lịch đăng bài"
 #                           theo luật giãn giờ (cùng đợt có Bầu+Newborn → Newborn +30'). Đồng thời SYNC
 #                           kết quả IG của đợt trước về cột IG Trạng thái / IG Link / IG Log ở 14.3.
 #   B2 post-instagram-api.js : đăng các dòng 22.2 ĐÃ TỚI GIỜ HẸN lên Instagram, ghi kết quả về 22.2.
+#   B3 mirror-fb-to-threads.js : y hệt B1 nhưng đích là bảng 23.3 và bộ cột TH Trạng thái / TH Link / TH Log.
+#                           Khác B1 một điểm: bài TOÀN CHỮ vẫn xếp hàng (Threads đăng được, Instagram thì không).
 #
-# Cả 2 Page đăng CHUNG 1 tài khoản IG (@thoministudio) — cấu hình ở bảng 22.1.
+# ⚠️ VÌ SAO KHÔNG CÓ B4 "đăng Threads" Ở ĐÂY: việc đăng Threads đã do workflow `auto-dang-threads.yml`
+#    làm sẵn (cron 7,22,37,52). Thêm bước đăng vào đây sẽ có LÚC hai workflow cùng chạy
+#    post-threads-api.js trên cùng một dòng 23.3 (GitHub cron trễ 5–30' nên hai lịch lệch pha vẫn
+#    có thể chồng nhau) ⇒ ĐĂNG TRÙNG. Một người đăng là đủ. Giá phải trả: bài xếp hàng ở đây chờ
+#    tối đa ~15 phút mới lên Threads. Chấp nhận được, vì mirror vốn đã giãn 30'/bài.
+#
+# Cả 2 Page đăng CHUNG 1 tài khoản IG (@thoministudio, bảng 22.1) và CHUNG 1 tài khoản Threads (bảng 23.2).
 # GitHub cron có thể trễ 5–30' lúc tải cao ⇒ Newborn có thể lên trong khoảng T+30…T+40'. Chấp nhận được.
 name: mirror-ig
 
@@ -54,3 +65,19 @@ jobs:
           IG_POSTS_TABLE:    ${{ vars.TABLE_IG_POST || 'tblVD7RqIPRA0TBb' }}    # bảng 22.2
           MAX_POSTS:         ${{ vars.IG_MAX_POSTS || '10' }}
         run: node scripts/post-instagram-api.js
+
+      # Chạy dù B1/B2 lỗi — Instagram hỏng KHÔNG được kéo Threads chết theo.
+      # Hai nền tảng dùng hai hệ token, hai bảng, hai bộ cột riêng nên không giẫm chân nhau.
+      - name: B3 — Mirror FB→Threads (xếp hàng 23.3 + sync ngược 14.3)
+        if: always()
+        env:
+          LARK_APP_SECRET:   ${{ secrets.LARK_APP_SECRET }}
+          LARK_APP_ID:       ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:    ${{ vars.LARK_BASE_ID }}
+          FB_POSTS_TABLE:    ${{ vars.TABLE_DANGBAI || 'tblC80uwemNeY9s1' }}    # bảng 14.3
+          TH_POSTS_TABLE:    ${{ vars.TABLE_TH_POST || 'tbl3N6ki0goOi1e2' }}    # bảng 23.3
+          TH_ACCOUNTS_TABLE: ${{ vars.TABLE_TH_ACC  || 'tblrsjSPGS7DVPED' }}    # bảng 23.2
+          BAU_PAGE_ID:       ${{ vars.BAU_PAGE_ID || '252437297948793' }}
+          NEWBORN_PAGE_ID:   ${{ vars.NEWBORN_PAGE_ID || '107291022310921' }}
+          STAGGER_MINUTES:   ${{ vars.TH_STAGGER_MINUTES || '30' }}
+        run: node scripts/mirror-fb-to-threads.js
