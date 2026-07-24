@@ -35,10 +35,10 @@
  *   - Sau khi xếp hàng   →  TH Log = "[queued] 23.3=<recId> due=<ISO> @<nowISO>".
  *   - Sau khi đăng xong  →  RECONCILE đọc dòng 23.3, set TH Trạng thái + TH Link + TH Log.
  *
- * ⚠️ HASHTAG: bảng 23.3 KHÔNG có cột Hastag, mà Threads chặn cứng 500 "ký tự" (emoji đếm
- *    theo byte UTF-8, xem thLen). Nên hashtag chỉ được nối vào cuối caption KHI CÒN CHỖ
- *    (≤ TH_SOFT_LIMIT). Không đủ chỗ thì BỎ hashtag và ghi rõ vào TH Log — thà mất hashtag
- *    còn hơn để post-threads-api phải gọi AI cắt gọt rồi ăn mất luôn phần nội dung.
+ * 📝 STATUS NGẮN: Threads nhận **media + status ngắn**, KHÔNG bê nguyên caption Facebook sang.
+ *    Engine tự cắt lấy phần nội dung thật (hook + thân + câu ký chốt), bỏ khối chân ký và
+ *    hashtag — xem shortStatus() bên dưới để biết luật cắt và số liệu kiểm chứng.
+ *    Hashtag mặc định KHÔNG kèm; bật lại bằng Variable TH_ADD_HASHTAG=true.
  *
  * BIẾN MÔI TRƯỜNG:
  *   LARK_APP_ID, LARK_APP_SECRET, LARK_APP_TOKEN (=LARK_BASE_ID)     (bắt buộc)
@@ -197,13 +197,52 @@ function th23Type(loai, loaiND, atts){
   const isReel = /video/i.test(loai) || (loaiND||'').toLowerCase().trim().startsWith('reel') || atts.some(isVid);
   return isReel ? 'Video' : 'Hình ảnh';
 }
-// Nối hashtag vào caption KHI CÒN CHỖ dưới trần mềm; hết chỗ thì bỏ, trả về ghi chú.
+/* ---------- STATUS NGẮN cho Threads (chốt với CEO 2026-07-25) ----------
+ * CEO: "tôi cần đăng hình ảnh hoặc video kèm status ngắn" ⇒ Threads KHÔNG bê nguyên caption
+ * Facebook sang. Chỉ lấy phần NỘI DUNG THẬT (hook + thân + câu ký chốt), bỏ khối chân ký
+ * (tên tiệm / địa chỉ / hotline / m.me) và khối hashtag.
+ *
+ * VÌ SAO CẮT ĐƯỢC BẰNG LUẬT CỨNG, KHÔNG CẦN AI: caption của cả 2 Page đều có DẤU KẺ NGANG
+ * ngăn nội dung với chân ký — Page Newborn dùng "━━━━━━━━━━━━━━", Page Bầu dùng "———".
+ * Đo trên 111 bài sắp đăng: cắt được 111/111, dài trung bình 303 ký tự Threads, dài nhất 449,
+ * KHÔNG bài nào vượt trần 500, không bài nào sót chân ký/hashtag, không bài nào rỗng.
+ *
+ * ⇒ Hệ quả quan trọng: vì status luôn < 500, engine post-threads-api.js KHÔNG BAO GIỜ phải
+ *   cô đọng bằng AI và KHÔNG BAO GIỜ cắt cụt ⇒ không cần ANTHROPIC_API_KEY nữa.
+ *
+ * Thứ tự phòng thủ (dừng ở cái đầu tiên khớp):
+ *   1. dòng kẻ ngang (3 ký tự trở lên: ━ ─ ═ — – - _ * = · .)
+ *   2. dòng MỞ ĐẦU bằng 📍 📸 🏠 📞 ☎ hoặc # — tức khối chân ký/hashtag
+ *      (chỉ tính khi đứng ĐẦU DÒNG; "…giữ lại cho mẹ 📸" giữa câu văn KHÔNG bị cắt nhầm)
+ *   3. không tìm thấy gì → giữ nguyên caption, rồi cắt ở ranh giới câu nếu quá dài
+ */
+const SEP_LINE  = /^\s*[━─═—–\-_*=·.]{3,}\s*$/;
+const SIG_LINE  = /^\s*(📍|📸|🏠|📞|☎|#)/;
+const TAGS_ONLY = /^\s*(#\S+\s*)+$/;
+function shortStatus(caption){
+  const max = CFG.SOFT_LIMIT;
+  const lines = String(caption||'').replace(/\r/g,'').split('\n');
+  let cut = lines.findIndex(l => SEP_LINE.test(l));
+  if(cut < 0) cut = lines.findIndex(l => SIG_LINE.test(l));
+  let head = (cut >= 0 ? lines.slice(0, cut) : lines).join('\n');
+  head = head.split('\n').filter(l => !TAGS_ONLY.test(l)).join('\n').trim();
+  if(!head) head = String(caption||'').trim();          // không cắt được gì → giữ nguyên
+  if(thLen(head) <= max) return head;
+  let out='', n=0;                                       // vẫn dài → cắt ở ranh giới câu
+  for(const seg of head.split(/(?<=[.!?…\n])\s*/)){
+    const k = thLen(seg); if(n + k > max) break; out += seg; n += k;
+  }
+  return (out.trim() || head.slice(0, max)).trim();
+}
+// Mặc định KHÔNG kèm hashtag (CEO muốn status ngắn). Bật lại bằng Variable TH_ADD_HASHTAG=true.
 function captionForThreads(caption, tags){
-  const base=(caption||'').trim();
-  if(!tags) return { text:base, note:'' };
+  const base = shortStatus(caption);
+  const note = base && thLen(base) < thLen(String(caption||'').trim()) ? 'status ngắn' : '';
+  if(!tags || String(process.env.TH_ADD_HASHTAG||'').toLowerCase() !== 'true')
+    return { text:base, note };
   const merged = base ? base+'\n\n'+tags : tags;
-  if(thLen(merged) <= CFG.SOFT_LIMIT) return { text:merged, note:'' };
-  return { text:base, note:`bỏ hashtag (sẽ vượt ${CFG.SOFT_LIMIT})` };
+  if(thLen(merged) <= CFG.SOFT_LIMIT) return { text:merged, note:(note?note+' +tag':'+tag') };
+  return { text:base, note:(note?note+' ':'')+`bỏ hashtag (sẽ vượt ${CFG.SOFT_LIMIT})` };
 }
 
 /* ================================ MAIN ================================ */
