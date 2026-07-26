@@ -105,3 +105,14 @@ jobs:
           NEWBORN_PAGE_ID:                  ${{ vars.NEWBORN_PAGE_ID || '107291022310921' }}
           MAX_POSTS:                        ${{ vars.TIKTOK_MAX_POSTS || '5' }}
         run: node scripts/mirror-fb-to-tiktok.js
+
+      # Chạy CUỐI CÙNG (sau khi IG/TH/TikTok đã ghi trạng thái) — gộp báo cáo đa nền tảng
+      # vào 1 cột "Đã đăng ở đâu" ở 14.3. Chỉ ghi dòng THAY ĐỔI nên nhẹ. Không tự đăng gì.
+      - name: B5 — Gộp báo cáo đa nền tảng vào cột "Đã đăng ở đâu"
+        if: always()
+        env:
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_APP_ID:     ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:  ${{ vars.LARK_BASE_ID }}
+          FB_POSTS_TABLE:  ${{ vars.TABLE_DANGBAI || 'tblC80uwemNeY9s1' }}
+        run: node scripts/sync-dang-o-dau.js
