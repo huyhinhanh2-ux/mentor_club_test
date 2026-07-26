@@ -95,9 +95,13 @@ jobs:
           LARK_APP_ID:              ${{ vars.LARK_APP_ID }}
           LARK_APP_TOKEN:           ${{ vars.LARK_BASE_ID }}
           FB_POSTS_TABLE:           ${{ vars.TABLE_DANGBAI || 'tblC80uwemNeY9s1' }}    # bảng 14.3
-          ZERNIO_API_KEY:           ${{ secrets.ZERNIO_API_KEY }}
-          ZERNIO_TIKTOK_ACCOUNT_ID: ${{ vars.ZERNIO_TIKTOK_ACCOUNT_ID || '6a663b08542d8bc5a60ba6a7' }}
-          ZERNIO_PROFILE_ID:        ${{ vars.ZERNIO_PROFILE_ID || '6a66397d09f56efe77297708' }}
-          BAU_PAGE_ID:              ${{ vars.BAU_PAGE_ID || '252437297948793' }}
-          MAX_POSTS:                ${{ vars.TIKTOK_MAX_POSTS || '5' }}
+          ZERNIO_API_KEY:                   ${{ secrets.ZERNIO_API_KEY }}
+          # accountId/profileId là ID thường (không bí mật) → nhúng mặc định, vẫn cho vars ghi đè.
+          ZERNIO_TIKTOK_BAU_ACCOUNT_ID:     ${{ vars.ZERNIO_TIKTOK_BAU_ACCOUNT_ID || '6a663b08542d8bc5a60ba6a7' }}
+          ZERNIO_BAU_PROFILE_ID:            ${{ vars.ZERNIO_BAU_PROFILE_ID || '6a66397d09f56efe77297708' }}
+          ZERNIO_TIKTOK_NEWBORN_ACCOUNT_ID: ${{ vars.ZERNIO_TIKTOK_NEWBORN_ACCOUNT_ID || '6a664bc0542d8bc5a60d0938' }}
+          ZERNIO_NEWBORN_PROFILE_ID:        ${{ vars.ZERNIO_NEWBORN_PROFILE_ID || '6a664b6e986dcd50f74547d8' }}
+          BAU_PAGE_ID:                      ${{ vars.BAU_PAGE_ID || '252437297948793' }}
+          NEWBORN_PAGE_ID:                  ${{ vars.NEWBORN_PAGE_ID || '107291022310921' }}
+          MAX_POSTS:                        ${{ vars.TIKTOK_MAX_POSTS || '5' }}
         run: node scripts/mirror-fb-to-tiktok.js
