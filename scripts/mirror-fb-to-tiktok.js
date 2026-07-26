@@ -2,9 +2,15 @@
 /*
  * mirror-fb-to-tiktok.js — TỰ ĐỘNG NẠP VIDEO Facebook → NHÁP TikTok (Creator Inbox) qua Zernio.
  *
- * Ý tưởng (chốt với CEO 2026-07-27): mỗi VIDEO của Page Bầu đã ĐĂNG FACEBOOK THÀNH CÔNG thì
- * lấy chính video đó NẠP VÀO HỘP THƯ NHÁP của tài khoản TikTok Bầu. CEO chủ động mở app TikTok,
+ * Ý tưởng (chốt với CEO 2026-07-27): mỗi VIDEO của Page Bầu/Newborn đã ĐĂNG FACEBOOK THÀNH CÔNG thì
+ * lấy chính video đó NẠP VÀO HỘP THƯ NHÁP của tài khoản TikTok TƯƠNG ỨNG. CEO chủ động mở app TikTok,
  * thêm nhạc trend + sửa caption + bấm đăng. Máy chỉ lo phần nặng: bê video lên nằm sẵn trong nháp.
+ *
+ * PHÂN LUỒNG THEO PAGE (mỗi page đổ đúng tài khoản TikTok của nó):
+ *   Page Bầu (BAU_PAGE_ID)         → TikTok @thoministudio_chupanhbau  (profile "Default")
+ *   Page Newborn (NEWBORN_PAGE_ID) → TikTok @th.mini.newborn          (profile "tiktok newborn")
+ *   ⚠️ Zernio: mỗi PROFILE chỉ chứa 1 tài khoản TikTok ⇒ mỗi tài khoản có accountId + profileId RIÊNG.
+ *      Gửi post PHẢI kèm ĐÚNG cặp {accountId, profileId} của tài khoản đó.
  *
  * VÌ SAO ĐÂY LÀ "NHÁP TRONG APP" CHỨ KHÔNG PHẢI ĐĂNG THẲNG:
  *   Gọi Zernio với publishNow:true + tiktokSettings.draft:true ⇒ Zernio dùng cửa "inbox upload"
@@ -20,9 +26,9 @@
  *    KHÔNG bê khối chân ký (📍 địa chỉ / 📞 hotline) — trên TikTok trông kỳ cục. CEO tự hoàn thiện.
  *
  * ⚠️ MEDIA phải là URL CÔNG KHAI (Zernio cURL video từ URL). Lark cần đăng nhập ⇒ vô dụng.
- *    Cách gỡ (tái dùng y hệt engine Threads): đẩy video lên chính FB Page Bầu ở dạng published=false
- *    (không ai thấy) → lấy link CDN công khai Facebook → đưa Zernio → GIỮ cho tới khi Zernio tải xong
- *    rồi mới xoá (Zernio tải bất đồng bộ, xoá sớm là hụt).
+ *    Cách gỡ (tái dùng y hệt engine Threads): đẩy video lên chính FB Page CỦA BÀI ĐÓ ở dạng
+ *    published=false (không ai thấy) → lấy link CDN công khai Facebook → đưa Zernio → GIỮ cho tới
+ *    khi Zernio tải xong rồi mới xoá (Zernio tải bất đồng bộ, xoá sớm là hụt).
  *
  * Đánh dấu chống trùng (KHÔNG đổi schema, giống bộ cột IG/Threads):
  *   - Đủ điều kiện xử lý ⇔ "TikTok Trạng thái" TRỐNG và "TikTok Log" TRỐNG.
@@ -30,14 +36,14 @@
  *   - Bài cũ đã đóng dấu "Bỏ qua (cũ)" (hàng rào từ ngày mai) → không đụng.
  *
  * BIẾN MÔI TRƯỜNG:
- *   LARK_APP_ID, LARK_APP_SECRET, LARK_APP_TOKEN (=LARK_BASE_ID)          (bắt buộc)
- *   FB_POSTS_TABLE            = bảng 14.3 (nguồn)                          (bắt buộc)
- *   ZERNIO_API_KEY           = khóa Zernio (Bearer)                       (bắt buộc)
- *   ZERNIO_TIKTOK_ACCOUNT_ID = accountId TikTok Bầu ở Zernio              (bắt buộc)
- *   ZERNIO_PROFILE_ID        = profileId Zernio (mặc định lấy từ account) (tùy chọn)
- *   BAU_PAGE_ID              (mặc định 252437297948793)
- *   MAX_POSTS                (mặc định 5 — trần an toàn mỗi lần chạy)
- *   LARK_DOMAIN, GRAPH_VERSION
+ *   LARK_APP_ID, LARK_APP_SECRET, LARK_APP_TOKEN (=LARK_BASE_ID)              (bắt buộc)
+ *   FB_POSTS_TABLE  = bảng 14.3 (nguồn)                                       (bắt buộc)
+ *   ZERNIO_API_KEY  = khóa Zernio (Bearer)                                    (bắt buộc)
+ *   ZERNIO_TIKTOK_BAU_ACCOUNT_ID / ZERNIO_BAU_PROFILE_ID       (mặc định đã nhúng)
+ *   ZERNIO_TIKTOK_NEWBORN_ACCOUNT_ID / ZERNIO_NEWBORN_PROFILE_ID (mặc định đã nhúng)
+ *   BAU_PAGE_ID (mặc định 252437297948793) · NEWBORN_PAGE_ID (mặc định 107291022310921)
+ *   MAX_POSTS (mặc định 5) · LARK_DOMAIN · GRAPH_VERSION
+ *   → Route nào THIẾU accountId thì bỏ qua page đó (vẫn chạy các route còn lại).
  *
  * Chạy:  node scripts/mirror-fb-to-tiktok.js
  *        node scripts/mirror-fb-to-tiktok.js --dry-run   (chỉ in kế hoạch, KHÔNG đẩy/ghi)
@@ -50,9 +56,12 @@ const CFG = {
   APP_TOKEN:  process.env.LARK_APP_TOKEN    || '',
   FB_TABLE:   process.env.FB_POSTS_TABLE    || '',
   ZKEY:       process.env.ZERNIO_API_KEY    || '',
-  ZACC:       process.env.ZERNIO_TIKTOK_ACCOUNT_ID || '',
-  ZPROFILE:   process.env.ZERNIO_PROFILE_ID || '',
-  BAU:        process.env.BAU_PAGE_ID       || '252437297948793',
+  BAU_PAGE:   process.env.BAU_PAGE_ID       || '252437297948793',
+  NB_PAGE:    process.env.NEWBORN_PAGE_ID   || '107291022310921',
+  BAU_ACC:    process.env.ZERNIO_TIKTOK_BAU_ACCOUNT_ID     || '6a663b08542d8bc5a60ba6a7',
+  BAU_PROF:   process.env.ZERNIO_BAU_PROFILE_ID            || '6a66397d09f56efe77297708',
+  NB_ACC:     process.env.ZERNIO_TIKTOK_NEWBORN_ACCOUNT_ID || '6a664bc0542d8bc5a60d0938',
+  NB_PROF:    process.env.ZERNIO_NEWBORN_PROFILE_ID        || '6a664b6e986dcd50f74547d8',
   MAX:        parseInt(process.env.MAX_POSTS || '5', 10),
   LARK_DOMAIN:process.env.LARK_DOMAIN       || 'https://open.larksuite.com',
   GRAPH:      'https://graph.facebook.com/' + (process.env.GRAPH_VERSION || 'v21.0'),
@@ -65,8 +74,13 @@ if(!CFG.APP_SECRET) _m.push('LARK_APP_SECRET');
 if(!CFG.APP_TOKEN)  _m.push('LARK_APP_TOKEN (=LARK_BASE_ID)');
 if(!CFG.FB_TABLE)   _m.push('FB_POSTS_TABLE (bảng 14.3)');
 if(!CFG.ZKEY)       _m.push('ZERNIO_API_KEY');
-if(!CFG.ZACC)       _m.push('ZERNIO_TIKTOK_ACCOUNT_ID');
 if(_m.length){ console.error('!! Thiếu biến môi trường: '+_m.join(', ')); process.exit(1); }
+
+// Bản đồ page → tài khoản TikTok. Route thiếu accountId sẽ bị loại (cho phép chạy 1 page khi page kia chưa nối).
+const ROUTES = {};
+if(CFG.BAU_ACC) ROUTES[CFG.BAU_PAGE] = { acc:CFG.BAU_ACC, prof:CFG.BAU_PROF, label:'Bầu' };
+if(CFG.NB_ACC)  ROUTES[CFG.NB_PAGE]  = { acc:CFG.NB_ACC,  prof:CFG.NB_PROF,  label:'Newborn' };
+if(!Object.keys(ROUTES).length){ console.error('!! Chưa khai accountId cho page nào (BAU/NEWBORN).'); process.exit(1); }
 
 // Cột 14.3
 const F = { caption:'Nội dung', hashtag:'Hastag', media:'Ảnh/video', status:'Trạng thái',
@@ -117,14 +131,15 @@ async function downloadMedia(fileToken, out){
   throw new Error('không tải được video từ Lark ('+fileToken+')');
 }
 
-/* ---------- Mượn CDN Facebook để tạo URL công khai cho video (published=false) ---------- */
+/* ---------- Mượn CDN Facebook để tạo URL công khai cho video (published=false) ----------
+ * Upload lên CHÍNH Page của bài (pageId) bằng token của page đó → không phụ thuộc page nào cố định. */
 async function fbApi(u,o){ const r=await fetch(u,o); const t=await r.text(); let j; try{j=JSON.parse(t)}catch{j={_raw:t}}
   if(!r.ok||j.error) throw new Error('FB '+r.status+': '+JSON.stringify(j.error||j._raw)); return j; }
-async function videoToPublicUrl(pageToken, file){
+async function videoToPublicUrl(pageId, pageToken, file){
   const fd=new FormData();
   fd.set('access_token', pageToken); fd.set('published','false');
   fd.set('source', new Blob([fs.readFileSync(file)]), path.basename(file));
-  const up=await fbApi(`${CFG.GRAPH}/${CFG.BAU}/videos`,{method:'POST',body:fd});
+  const up=await fbApi(`${CFG.GRAPH}/${pageId}/videos`,{method:'POST',body:fd});
   if(!up.id) throw new Error('không upload được video tạm lên FB Page');
   for(let i=0;i<60;i++){   // FB cần vài phút xử lý video
     const s=await fbApi(`${CFG.GRAPH}/${up.id}?fields=source,status&access_token=${encodeURIComponent(pageToken)}`,{});
@@ -149,14 +164,14 @@ function captionForTikTok(content, hashtagCell){
   return (hook + (tags ? '\n\n' + tags : '')).trim();
 }
 
-/* ---------- Zernio: nạp video vào NHÁP TikTok (Creator Inbox) ---------- */
-async function zernioDraft(caption, videoUrl){
+/* ---------- Zernio: nạp video vào NHÁP TikTok (Creator Inbox) của ĐÚNG tài khoản ---------- */
+async function zernioDraft(caption, videoUrl, accId, profileId){
   const body = {
     content: caption,
     publishNow: true,                          // kích hoạt gửi sang TikTok (không giữ nháp Zernio)
     mediaItems: [{ type:'video', url:videoUrl }],
-    platforms: [{ platform:'tiktok', accountId:CFG.ZACC }],
-    ...(CFG.ZPROFILE ? { profileId: CFG.ZPROFILE } : {}),
+    platforms: [{ platform:'tiktok', accountId:accId }],
+    ...(profileId ? { profileId } : {}),
     tiktokSettings: {
       draft: true,                             // ← "Send to Creator Inbox" = nháp trong app TikTok
       privacy_level:'PUBLIC_TO_EVERYONE', allow_comment:true, allow_duet:true, allow_stitch:true,
@@ -191,47 +206,51 @@ async function zernioWait(postId){
 (async()=>{
   _tk = await larkToken();
   const rows = await listAll(CFG.FB_TABLE);
+  log('Route đang bật: ' + Object.values(ROUTES).map(r=>r.label).join(', '));
 
   const cand = [];
   for(const row of rows){
     const f=row.fields;
-    if(String(plain(f[F.fanpageId])||'').trim() !== CFG.BAU) continue;   // chỉ Page Bầu
-    if(plain(f[F.status]).trim() !== FB_DONE) continue;                  // chưa đăng FB thành công
-    if(plain(f[F.ttStatus]).trim()) continue;                           // đã có kết luận TikTok
-    if(plain(f[F.ttLog]).trim())    continue;                           // đã xử lý / đã đánh dấu
+    const pid=String(plain(f[F.fanpageId])||'').trim();
+    const route=ROUTES[pid];
+    if(!route) continue;                                                // page ngoài phạm vi (chưa nối TikTok)
+    if(plain(f[F.status]).trim() !== FB_DONE) continue;                 // chưa đăng FB thành công
+    if(plain(f[F.ttStatus]).trim()) continue;                          // đã có kết luận TikTok
+    if(plain(f[F.ttLog]).trim())    continue;                          // đã xử lý / đã đánh dấu
     const atts=Array.isArray(f[F.media])?f[F.media]:[];
     const vid=atts.find(isVid);
-    if(!vid) continue;                                                  // chỉ VIDEO
+    if(!vid) continue;                                                 // chỉ VIDEO
     const pageToken=plain(f[F.pageToken]).trim();
-    if(!pageToken){ // không có token Page → không tạo được URL công khai. Đánh dấu để khỏi lặp.
-      if(!DRY) await updateRow(CFG.FB_TABLE, row.record_id, { [F.ttStatus]:TT_FAIL, [F.ttLog]:`[fail] ${now()} - thiếu access_token Page Bầu` });
+    if(!pageToken){
+      if(!DRY) await updateRow(CFG.FB_TABLE, row.record_id, { [F.ttStatus]:TT_FAIL, [F.ttLog]:`[fail] ${now()} - thiếu access_token Page` });
       continue;
     }
-    cand.push({ row, vid, pageToken,
+    cand.push({ row, vid, pageId:pid, pageToken, route,
       caption: captionForTikTok(plain(f[F.caption]), plain(f[F.hashtag])) });
   }
 
-  if(!cand.length){ log('Xong. Không có video Bầu mới đủ điều kiện nạp nháp TikTok.'); return; }
-  log(`Ứng viên: ${cand.length} video Bầu. Sẽ xử tối đa ${CFG.MAX} lần chạy này.`);
+  if(!cand.length){ log('Xong. Không có video mới đủ điều kiện nạp nháp TikTok.'); return; }
+  const byLabel = cand.reduce((m,c)=>{m[c.route.label]=(m[c.route.label]||0)+1;return m;},{});
+  log(`Ứng viên: ${cand.length} (${Object.entries(byLabel).map(([k,v])=>k+' '+v).join(', ')}). Xử tối đa ${CFG.MAX} lần chạy này.`);
 
   let done=0, fail=0;
   for(const c of cand){
     if(done+fail >= CFG.MAX){ log(`… dừng ở trần MAX_POSTS=${CFG.MAX}, phần còn lại để lượt sau.`); break; }
     const rid=c.row.record_id;
-    log(`>> ${rid} | ${c.vid.name} | "${c.caption.slice(0,40).replace(/\n/g,' ')}"`);
+    log(`>> [${c.route.label}] ${rid} | ${c.vid.name} | "${c.caption.slice(0,36).replace(/\n/g,' ')}"`);
     if(DRY){ continue; }
     const tmp=path.join(os.tmpdir(), `tk_${rid}_${(c.vid.name||'v').replace(/[^\w.]/g,'')}`);
     let videoId=null;
     try{
       const sz=await downloadMedia(c.vid.file_token, tmp);
-      log(`   tải video ${(sz/1e6).toFixed(1)}MB → mượn CDN Facebook…`);
-      const pub=await videoToPublicUrl(c.pageToken, tmp); videoId=pub.videoId;
-      log(`   URL công khai OK → đẩy vào nháp TikTok…`);
-      const z=await zernioDraft(c.caption, pub.url);
+      log(`   tải video ${(sz/1e6).toFixed(1)}MB → mượn CDN Facebook (page ${c.pageId})…`);
+      const pub=await videoToPublicUrl(c.pageId, c.pageToken, tmp); videoId=pub.videoId;
+      log(`   URL công khai OK → đẩy vào nháp TikTok ${c.route.label}…`);
+      const z=await zernioDraft(c.caption, pub.url, c.route.acc, c.route.prof);
       const w=await zernioWait(z.id);
       if(w.ok){
-        await updateRow(CFG.FB_TABLE, rid, { [F.ttStatus]:TT_DONE, [F.ttLog]:`[done] ${now()} - nháp TikTok (${w.publishId||w.detail})` });
-        done++; log(`   ✔ ĐÃ NẠP NHÁP TikTok (${w.publishId||w.detail})`);
+        await updateRow(CFG.FB_TABLE, rid, { [F.ttStatus]:TT_DONE, [F.ttLog]:`[done] ${now()} - nháp TikTok ${c.route.label} (${w.publishId||w.detail})` });
+        done++; log(`   ✔ ĐÃ NẠP NHÁP TikTok ${c.route.label} (${w.publishId||w.detail})`);
       } else {
         await updateRow(CFG.FB_TABLE, rid, { [F.ttStatus]:TT_FAIL, [F.ttLog]:`[fail] ${now()} - Zernio: ${String(w.detail).slice(0,160)}` });
         fail++; log(`   ✖ THẤT BẠI: ${w.detail}`);
