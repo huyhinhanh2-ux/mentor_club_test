@@ -11,6 +11,10 @@
 #   B2 post-instagram-api.js : đăng các dòng 22.2 ĐÃ TỚI GIỜ HẸN lên Instagram, ghi kết quả về 22.2.
 #   B3 mirror-fb-to-threads.js : y hệt B1 nhưng đích là bảng 23.3 và bộ cột TH Trạng thái / TH Link / TH Log.
 #                           Khác B1 một điểm: bài TOÀN CHỮ vẫn xếp hàng (Threads đăng được, Instagram thì không).
+#   B4 mirror-fb-to-tiktok.js : VIDEO của Page Bầu đã đăng FB thành công → NẠP VÀO NHÁP TikTok (Creator
+#                           Inbox) qua Zernio. CEO tự mở app thêm nhạc + đăng. Khác B1/B3: KHÔNG có bảng
+#                           hàng đợi (Zernio vừa nhận URL vừa tự đẩy lên TikTok) và KHÔNG có bước "đăng"
+#                           riêng. Ghi kết quả về bộ cột TikTok Trạng thái / TikTok Log ở 14.3.
 #
 # ⚠️ VÌ SAO KHÔNG CÓ B4 "đăng Threads" Ở ĐÂY: việc đăng Threads đã do workflow `auto-dang-threads.yml`
 #    làm sẵn (cron 7,22,37,52). Thêm bước đăng vào đây sẽ có LÚC hai workflow cùng chạy
@@ -81,3 +85,19 @@ jobs:
           NEWBORN_PAGE_ID:   ${{ vars.NEWBORN_PAGE_ID || '107291022310921' }}
           STAGGER_MINUTES:   ${{ vars.TH_STAGGER_MINUTES || '30' }}
         run: node scripts/mirror-fb-to-threads.js
+
+      # Chạy dù các bước trên lỗi — cùng lẽ tách biệt như B3.
+      # Chỉ ZERNIO_API_KEY là bí mật; accountId/profileId là ID thường nên nhúng mặc định (vẫn cho vars ghi đè).
+      - name: B4 — Mirror FB→TikTok (nạp video Bầu vào nháp TikTok qua Zernio)
+        if: always()
+        env:
+          LARK_APP_SECRET:          ${{ secrets.LARK_APP_SECRET }}
+          LARK_APP_ID:              ${{ vars.LARK_APP_ID }}
+          LARK_APP_TOKEN:           ${{ vars.LARK_BASE_ID }}
+          FB_POSTS_TABLE:           ${{ vars.TABLE_DANGBAI || 'tblC80uwemNeY9s1' }}    # bảng 14.3
+          ZERNIO_API_KEY:           ${{ secrets.ZERNIO_API_KEY }}
+          ZERNIO_TIKTOK_ACCOUNT_ID: ${{ vars.ZERNIO_TIKTOK_ACCOUNT_ID || '6a663b08542d8bc5a60ba6a7' }}
+          ZERNIO_PROFILE_ID:        ${{ vars.ZERNIO_PROFILE_ID || '6a66397d09f56efe77297708' }}
+          BAU_PAGE_ID:              ${{ vars.BAU_PAGE_ID || '252437297948793' }}
+          MAX_POSTS:                ${{ vars.TIKTOK_MAX_POSTS || '5' }}
+        run: node scripts/mirror-fb-to-tiktok.js
