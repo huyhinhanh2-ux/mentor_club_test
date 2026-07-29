@@ -46,6 +46,45 @@ if(_miss.length){ console.error('!! Thiếu biến môi trường: '+_miss.join(
 const F = { link:'Link Page', type:'Loại', caption:'Nội dung', comment:'Comment ebook', media:'Ảnh/video',
             schedule:'Lịch đăng bài', status:'Trạng thái', log:'Log', linkPost:'Link bài đăng' };
 const DONE = 'Thành công', FAIL = 'Thất bại';
+
+// ── CHỐNG ĐĂNG TRÙNG ────────────────────────────────────────────────────────
+// Sự cố thật (2026-07-28, page Bầu + page Newborn): một dòng trong bảng lên
+// Facebook HAI BÀI giống hệt, cùng giờ. Bảng chỉ có đúng một dòng — nên không
+// phải lỗi dữ liệu, mà là hai lượt chạy cùng xử lý một dòng.
+//
+// Vì sao dính: bản cũ chỉ ghi "Thành công" SAU KHI đăng xong. Từ lúc đọc thấy
+// dòng còn "Chờ đăng" tới lúc ghi trạng thái là cả quãng tải ảnh về + đẩy lên
+// Facebook — dài hàng chục giây tới vài phút. Trong quãng đó, lượt chạy thứ hai
+// (cron 15 phút, hoặc người bấm nút) đọc vẫn thấy "Chờ đăng" ⇒ đăng lần nữa.
+//
+// Sửa: GIÀNH CHỖ TRƯỚC KHI ĐĂNG. Ghi ngay một dấu "ĐANG ĐĂNG (<mã lượt chạy>)"
+// vào cột Log, rồi ĐỌC LẠI xem dấu còn là của mình không. Không phải của mình
+// ⇒ lượt khác giành trước ⇒ nhường. Cách này thu cửa sổ tranh chấp từ vài phút
+// xuống còn khoảng một giây, và cửa sổ đó lại được `concurrency` chặn nốt.
+//
+// Cố ý đánh dấu vào LOG chứ không thêm lựa chọn "Đang đăng" vào cột Trạng thái:
+// sửa cột select trên Lark là ghi đè TOÀN BỘ định nghĩa cột (không phải vá từng
+// phần), làm hỏng là hỏng cả cột đang gánh mấy trăm dòng. Log là cột text tự do,
+// ghi vào không rủi ro gì, mà vẫn nhìn thấy được trên giao diện.
+//
+// Dòng kẹt dấu ĐANG ĐĂNG (lượt chạy chết giữa chừng) được nhả sau CLAIM_TTL để
+// không kẹt vĩnh viễn.
+const CLAIM_TTL_MS = 20 * 60 * 1000;
+const RUN_TAG = process.env.GITHUB_RUN_ID
+  ? `run${process.env.GITHUB_RUN_ID}.${process.env.GITHUB_RUN_ATTEMPT || 1}`
+  : `local${process.pid}.${Date.now().toString(36)}`;
+const CLAIM_RE = /ĐANG ĐĂNG \(([^)]+)\)/;
+
+// Dòng Log lúc giành chỗ — có cả giờ để biết claim cũ đã thiu chưa.
+const claimLine = () => `${now()} - ĐANG ĐĂNG (${RUN_TAG})`;
+
+// Claim này còn hiệu lực không? (còn hạn = lượt khác đang làm thật, phải nhường)
+function claimConHan(logText) {
+  const m = String(logText || '').match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ĐANG ĐĂNG/);
+  if (!m) return false;
+  const t = Date.parse(m[1].replace(' ', 'T') + 'Z');
+  return Number.isFinite(t) && (Date.now() - t) < CLAIM_TTL_MS;
+}
 const now = () => new Date().toISOString().replace('T',' ').slice(0,19);
 const log = (...a) => console.log(now(), ...a);
 const plain = v => v==null?'':typeof v==='string'?v:Array.isArray(v)?v.map(x=>x.text||x.name||'').join(''):(v.text||v.name||v.link||String(v));
@@ -193,6 +232,33 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
     if(!pages.length){ log(`  [LỖI] ${recId}: không Page nào có ID/token trong bảng Pages`); if(!DRY)await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - Page thiếu ID/token`}); err++; continue; }
 
     if(CFG.RESPECT_SCHEDULE){ const s=scheduleMs(row.fields[F.schedule]); if(s&&s>nowMs){ log(`  [CHỜ GIỜ] ${recId}: hẹn ${new Date(s).toISOString().slice(0,16)}`); wait++; continue; } }
+
+    // ── GIÀNH CHỖ (xem ghi chú CHỐNG ĐĂNG TRÙNG ở đầu file) ──
+    // Làm SAU mọi phép kiểm rẻ tiền ở trên, ngay TRƯỚC khi đụng vào Facebook.
+    if(!DRY){
+      const logHienTai = plain(row.fields[F.log]);
+      if(claimConHan(logHienTai)){
+        log(`  [NHƯỜNG] ${recId}: lượt chạy khác đang đăng dòng này (${(logHienTai.match(CLAIM_RE)||[])[1]||'?'})`);
+        skip++; continue;
+      }
+      if(CLAIM_RE.test(logHienTai)){
+        // Dấu quá hạn = lượt chạy trước chết giữa chừng. Nhận lại để dòng không
+        // kẹt mãi, NHƯNG báo to: nếu nó chết SAU khi đã đẩy lên Facebook thì đăng
+        // lại sẽ ra bài trùng. Gặp dòng này nên mở page kiểm bằng mắt.
+        log(`  [⚠ NHẬN LẠI] ${recId}: kẹt dấu ĐANG ĐĂNG quá ${CLAIM_TTL_MS/60000} phút — kiểm page xem đã có bài chưa!`);
+      }
+      try{ await updateRow(tk,recId,{[F.log]:claimLine()}); }
+      catch(e){ log(`  [LỖI] ${recId}: không giành chỗ được - ${String(e.message||e).slice(0,120)}`); err++; continue; }
+
+      // Đọc lại để chắc dấu còn là của mình. Hai lượt cùng ghi trong tích tắc
+      // thì lượt ghi sau thắng — lượt thua phải nhường, không thì lại đăng đôi.
+      try{
+        const lai = await larkApi(`${CFG.LARK_DOMAIN}/open-apis/bitable/v1/apps/${CFG.APP_TOKEN}/tables/${CFG.TABLE_ID}/records/${recId}`,
+          {headers:{Authorization:'Bearer '+tk}}, 'recheck');
+        const chu = (plain(lai?.data?.record?.fields?.[F.log]).match(CLAIM_RE)||[])[1];
+        if(chu && chu!==RUN_TAG){ log(`  [NHƯỜNG] ${recId}: lượt ${chu} giành trước`); skip++; continue; }
+      }catch(e){ log(`  [!] ${recId}: không đọc lại được để xác nhận (${String(e.message||e).slice(0,80)}) — vẫn đăng tiếp`); }
+    }
 
     const caption=plain(row.fields[F.caption]);
     const loai=plain(row.fields[F.type]);

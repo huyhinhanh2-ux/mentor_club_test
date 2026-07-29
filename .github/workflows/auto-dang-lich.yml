@@ -7,6 +7,18 @@ on:
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
+# Không cho 2 lượt chạy chồng nhau (cron + nút bấm) → tránh đăng trùng.
+# Sự cố thật 2026-07-28: một dòng lên Facebook HAI BÀI giống hệt, cùng giờ, ở cả
+# page Bầu lẫn page Newborn. Bảng chỉ có đúng một dòng — hai lượt chạy cùng xử lý
+# nó, vì engine chỉ ghi "Thành công" SAU khi đăng xong, còn suốt quãng tải ảnh +
+# đẩy lên Facebook thì dòng vẫn hiện "Chờ đăng" cho lượt kia đọc thấy.
+# Xếp hàng chờ, KHÔNG hủy giữa chừng: hủy một lượt đang đẩy dở còn tệ hơn — bài
+# đã lên Facebook mà trạng thái chưa kịp ghi ⇒ lượt sau đăng lại lần nữa.
+# Nhóm phải TRÙNG TÊN với nhóm trong dang-bai.yml (GitHub gom theo TÊN nhóm).
+concurrency:
+  group: dang-facebook
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest

@@ -5,6 +5,13 @@ on:
     types: [dang-bai]
   workflow_dispatch:
 
+# Xếp hàng chung với auto-dang-lich.yml — hai workflow cùng gọi post-feed-api.js
+# trên CÙNG một bảng, chạy chồng là ra bài trùng. Tên nhóm phải trùng nhau.
+# cancel-in-progress: false — xem lý do ở auto-dang-lich.yml.
+concurrency:
+  group: dang-facebook
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
