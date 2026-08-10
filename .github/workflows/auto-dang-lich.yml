@@ -27,6 +27,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # Chrome dùng để DÀN TRANG ẢNH (scripts/photobook.js) — xem ghi chú ở dang-bai.yml.
+      - name: Bảo đảm có Chrome (dàn trang ảnh)
+        continue-on-error: true
+        run: |
+          if ! command -v google-chrome >/dev/null && ! command -v chromium-browser >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq chromium-browser || true
+          fi
+          command -v google-chrome || command -v chromium-browser || echo "!! không có Chrome — sẽ đăng kiểu nhiều ảnh như cũ"
       - name: Dang bai toi gio hen (post-feed-api.js)
         env:
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}

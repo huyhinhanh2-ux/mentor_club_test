@@ -23,6 +23,9 @@
  */
 'use strict';
 const fs = require('fs'), os = require('os'), path = require('path');
+// Ghép nhiều ảnh thành MỘT trang dàn ảnh trước khi đăng, để Facebook không tự cắt collage.
+// Tự tắt (trả về nguyên danh sách ảnh) khi thiếu Chrome hoặc PHOTOBOOK=false → không bao giờ chặn lượt đăng.
+const photobook = require('./photobook.js');
 const CFG = {
   APP_ID:       process.env.LARK_APP_ID    || '',
   APP_SECRET:   process.env.LARK_APP_SECRET|| '',
@@ -275,8 +278,11 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
       const results=[];
       for(const pg of pages){
         try{
+          // Dàn trang RIÊNG cho từng page: chân trang mang tên page đó.
+          const anh = kind==='video' ? files
+                    : await photobook.build(files,{ footer:pg.name, tag:`${recId}_${pg.fbId}`, tmp, log });
           const res = kind==='video' ? await postVideo(pg.fbId,pg.token,files[0],caption)
-                                      : await postPhotos(pg.fbId,pg.token,files,caption);
+                                      : await postPhotos(pg.fbId,pg.token,anh,caption);
           let cmtNote=''; if(commentText){ try{ await postComment(pg.fbId,pg.token,res.objectId,commentText); cmtNote=' +cmt'; }
             catch(e){ cmtNote=' (cmt lỗi)'; log(`     ! comment lỗi (${pg.name}): ${String(e.message||e).slice(0,120)}`); } }
           results.push({ name:pg.name, ok:true, permalink:res.permalink, objectId:res.objectId, cmtNote });
