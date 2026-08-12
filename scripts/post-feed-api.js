@@ -22,8 +22,10 @@
  * Giữ nhịp (xem khối GIỮ ĐÚNG GIỜ, KHÔNG ĐĂNG DỒN bên dưới):
  *   GRACE_MINUTES     (mặc định 90)  — trễ hơn bấy nhiêu phút thì thôi, không đăng lệch khung giờ
  *   MAX_FAIL          (mặc định 3)   — hỏng đủ bấy nhiêu lần thì ngưng thử lại
- *   MAX_VIDEO_MB      (mặc định 100) — video nặng hơn thì chặn từ đầu (Facebook trả 413)
+ *   MAX_VIDEO_MB      (mặc định 2048) — lưới an toàn cuối, chặn file to bất thường
  *   MOT_BAI_MOI_PAGE  ("false" để tắt) — mỗi lượt chạy, mỗi page chỉ đăng 1 bài
+ *   VIDEO_MOT_PHAT_MB (mặc định 50) — video dưới cỡ này đẩy một phát; trên thì
+ *                                     upload nhiều chặng (xem postVideo)
  * Token Facebook lấy TỪ bảng Pages (cột access_token) — không cần env FB.
  */
 'use strict';
@@ -43,7 +45,7 @@ const CFG = {
   // ── Ba con số giữ nhịp đăng (xem khối GIỮ ĐÚNG GIỜ, KHÔNG ĐĂNG DỒN bên dưới) ──
   GRACE_MIN:    +(process.env.GRACE_MINUTES  || 90),   // trễ quá bấy nhiêu phút thì THÔI, không đăng lệch khung giờ
   MAX_FAIL:     +(process.env.MAX_FAIL       || 3),    // thất bại đủ bấy nhiêu lần thì ngưng, không thử lại nữa
-  MAX_VIDEO_MB: +(process.env.MAX_VIDEO_MB   || 100),  // video nặng hơn mức này Facebook chắc chắn trả 413
+  MAX_VIDEO_MB: +(process.env.MAX_VIDEO_MB   || 2048), // lưới an toàn cuối: file to bất thường thì chặn, kẻo nạp nhầm
   MOT_BAI_MOI_PAGE: process.env.MOT_BAI_MOI_PAGE !== 'false',  // mỗi lượt chạy, mỗi page chỉ đăng 1 bài
 };
 const GRAPH = `https://graph.facebook.com/${CFG.GRAPH_VERSION}`;
@@ -103,7 +105,9 @@ const DONE = 'Thành công', FAIL = 'Thất bại';
 //   ② NGƯNG    — thất bại đủ MAX_FAIL lần thì thôi. Hết cảnh một video hỏng
 //                đập cửa Facebook mãi mãi rồi kéo cả hệ vào diện nghi spam.
 //   ③ CHẶN NẶNG— video quá MAX_VIDEO_MB bị chặn TRƯỚC khi tải về, không tốn
-//                một lần gọi Facebook nào. 413 là chắc chắn, thử là phí.
+//                một lần gọi Facebook nào. Từ 12/08 đây chỉ còn là LƯỚI AN TOÀN
+//                CUỐI (trần 2GB, phòng nạp nhầm file khổng lồ) — video nặng đã
+//                đăng được thật nhờ upload nhiều chặng, xem postVideo() bên dưới.
 //   ④ GIÃN NHỊP— mỗi lượt chạy, mỗi page chỉ đăng 1 bài. Cron 15 phút ⇒ hai bài
 //                cùng page luôn cách nhau ít nhất 15 phút, không bao giờ dính
 //                chùm. (Engine Instagram đã giãn 30 phút từ commit 8ae37ae.)
@@ -236,7 +240,79 @@ async function postPhotos(pageId, token, files, caption) {
     if(st.permalink_url) permalink=st.permalink_url.startsWith('/')?'https://www.facebook.com'+st.permalink_url:st.permalink_url; }catch{}
   return { objectId:post.id, permalink };
 }
+// ── ĐĂNG VIDEO NẶNG: UPLOAD NHIỀU CHẶNG ────────────────────────────────────
+// Đẩy nguyên khối (một request mang cả file) là cách cũ, và Facebook chặn ở
+// khoảng 100MB — trả về 413 Payload Too Large với thân rỗng, không một chữ giải
+// thích. Đó là thứ đã giết 4 video 148–170MB suốt 9 ngày (xem sự cố 11/08).
+//
+// Facebook có sẵn đường cho file lớn, đi ba chặng:
+//   start    → khai trước kích thước file, nhận về video_id + upload_session_id
+//              + khoảng byte đầu tiên cần gửi (start_offset → end_offset)
+//   transfer → gửi đúng khoảng byte đó; đáp lại là khoảng tiếp theo. Lặp tới khi
+//              hai đầu khoảng bằng nhau là hết file.
+//   finish   → chốt phiên, gắn caption, bài lên sóng.
+//
+// Hai điều đáng giá của cách này:
+//   · KHÔNG nạp cả file vào RAM — đọc đúng đoạn đang gửi bằng fs.readSync, nên
+//     video 2GB cũng chỉ tốn vài MB bộ nhớ.
+//   · Mảnh nào rớt mạng thì gửi LẠI ĐÚNG MẢNH ĐÓ, không phải làm lại từ đầu —
+//     đúng nghĩa "resumable". Với file trăm MB trên runner CI, đây là khác biệt
+//     giữa "đăng được" và "thỉnh thoảng hỏng lại phải chờ lượt sau".
+//
+// Video nhỏ vẫn đi đường cũ (một request, nhanh hơn, ít lần gọi API hơn).
+const NGUONG_PHAN_MANH = (+(process.env.VIDEO_MOT_PHAT_MB || 50)) * 1048576;
+
+async function uploadVideoNhieuChang(pageId, token, file, log) {
+  const size = fs.statSync(file.path).size;
+  const start = await fbFetch(`${GRAPH}/${pageId}/videos`, { method:'POST',
+    body:new URLSearchParams({ upload_phase:'start', file_size:String(size), access_token:token }) });
+  const sess = start.upload_session_id, videoId = start.video_id;
+  if(!sess || !videoId) throw new Error('start thiếu upload_session_id/video_id: '+JSON.stringify(start));
+
+  let from = +start.start_offset, to = +start.end_offset;
+  const fd = fs.openSync(file.path, 'r');
+  let manh = 0;
+  try {
+    while (from < to) {
+      const len = to - from;
+      const buf = Buffer.allocUnsafe(len);
+      fs.readSync(fd, buf, 0, len, from);          // đọc đúng đoạn đang gửi, không nạp cả file
+      let dap;
+      for (let i=0;;i++) {                          // rớt mảnh nào thì gửi lại đúng mảnh đó
+        try {
+          const form = new FormData();
+          form.set('upload_phase','transfer'); form.set('upload_session_id',sess);
+          form.set('start_offset',String(from));   form.set('access_token',token);
+          form.set('video_file_chunk', new Blob([buf]), file.name||'video.mp4');
+          dap = await fbFetch(`${GRAPH}/${pageId}/videos`, { method:'POST', body:form });
+          break;
+        } catch(e) {
+          if (i>=2) throw new Error(`mảnh tại byte ${from} hỏng sau 3 lần: ${String(e.message||e).slice(0,150)}`);
+          await sleep(2000*(i+1));
+        }
+      }
+      manh++;
+      if (log && manh % 5 === 0) log(`     … đã đẩy ${(from/1048576).toFixed(0)}/${(size/1048576).toFixed(0)}MB`);
+      from = +dap.start_offset; to = +dap.end_offset;
+    }
+  } finally { try{ fs.closeSync(fd); }catch{} }
+  if (log) log(`     … xong ${manh} mảnh (${(size/1048576).toFixed(1)}MB)`);
+  return { videoId, sess };
+}
+
 async function postVideo(pageId, token, file, caption) {
+  const size = fs.statSync(file.path).size;
+  if (size > NGUONG_PHAN_MANH) {
+    const { videoId, sess } = await uploadVideoNhieuChang(pageId, token, file, log);
+    await fbFetch(`${GRAPH}/${pageId}/videos`, { method:'POST',
+      body:new URLSearchParams({ upload_phase:'finish', upload_session_id:sess,
+        ...(caption?{description:caption}:{}), access_token:token }) });
+    let permalink='';
+    try{ const st=await fbFetch(`${GRAPH}/${videoId}?fields=permalink_url&access_token=${encodeURIComponent(token)}`,{method:'GET'});
+      permalink=st.permalink_url||''; }catch{}
+    if(permalink&&permalink.startsWith('/'))permalink='https://www.facebook.com'+permalink;
+    return { objectId:videoId, permalink:permalink||`https://www.facebook.com/${videoId}` };
+  }
   const fd=new FormData(); fd.set('access_token',token); if(caption)fd.set('description',caption);
   fd.set('source', new Blob([fs.readFileSync(file.path)]), file.name||'video.mp4');
   const j=await fbFetch(`${GRAPH}/${pageId}/videos`,{method:'POST',body:fd});
@@ -254,6 +330,13 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
   const t=plain(cell).trim(); if(!t)return null;
   const m=t.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/); if(m)return new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5]).getTime();
   const d=new Date(t); return isNaN(d)?null:d.getTime(); }
+
+// Mở cửa cho kiểm thử: `require` file này thì KHÔNG chạy vòng đăng, chỉ lấy hàm.
+// Nhờ vậy kiểm được luồng upload nhiều chặng bằng chính hàm thật (chạy start +
+// transfer rồi DỪNG, không finish ⇒ không bài nào lên sóng), thay vì chép tay
+// một bản mô phỏng rồi đinh ninh là giống.
+module.exports = { uploadVideoNhieuChang, postVideo, larkToken, listAll, downloadMedia, plain, NGUONG_PHAN_MANH };
+if (require.main !== module) return;
 
 (async()=>{
   const tk=await larkToken();
