@@ -32,8 +32,30 @@
  */
 const fs = require('fs'), os = require('os'), path = require('path'), cp = require('child_process');
 
+// ── ĐỘ NÉT CỦA TRANG GHÉP ──────────────────────────────────────────────────
+// CEO báo 12/08/2026: ảnh ghép page Bầu "chất lượng kém, vỡ nét".
+//
+// Nguyên nhân: bố cục tính bằng CSS pixel ở bề ngang 1080, và Chrome trước đây
+// chụp ở đúng tỷ lệ 1:1 ⇒ trang ra 1080px. Ghép 6 tấm thì mỗi ô chỉ còn ~500px
+// — trong khi ảnh gốc trong Lark là ảnh máy Canon 4000×6000 tới 6720×4480. Tức
+// là vứt đi ~87% chi tiết TRƯỚC KHI Facebook kịp nén, rồi màn hình điện thoại
+// đời mới (3 pixel thật cho 1 pixel logic) lại phóng tấm 1080 đó lên ⇒ nhòe.
+//
+// Sửa bằng cách chụp ở BỘI SỐ: giữ nguyên mọi con số bố cục (không đụng một
+// dòng CSS nào), chỉ bảo Chrome vẽ mỗi CSS pixel thành SCALE pixel thật. Trang
+// ra 2160px, mỗi ô ~1000px, chữ chân trang cũng nét gấp đôi.
+//
+// Vì sao dừng ở 2 mà không lên 3: Facebook hạ mọi ảnh feed về tối đa 2048px
+// cạnh dài. 2160 hạ xuống 2048 là mất 5% — không thấy được. Còn 3240px thì
+// tốn gấp rưỡi thời gian và bộ nhớ để rồi cũng bị hạ về đúng 2048.
+const SCALE = Math.max(1, +(process.env.PHOTOBOOK_SCALE || 2));
+const TRAN_MB = +(process.env.PHOTOBOOK_MAX_MB || 8);   // trần dung lượng trang ghép
+
 const W = 1080;                 // bề ngang trang, cố định — đúng bề ngang ảnh feed Facebook
-const H_MIN = 1080;             // 1:1  — thấp nhất, dưới nữa thì bài chiếm quá ít màn hình
+// 5:4 — thấp nhất, dưới nữa thì bài chiếm quá ít màn hình. Trước là 1080 (1:1),
+// hạ xuống vì bộ ảnh toàn ảnh NGANG xếp kiểu gì cũng không cao tới 1:1, phần
+// thiếu trở thành dải trắng trên–dưới chứ không thành ảnh to hơn.
+const H_MIN = 864;
 const H_MAX = 1350;             // 4:5  — cao nhất Facebook cho phép, quá nữa là bị cắt
 const PAD = 48;                 // lề ngoài trang
 const GAP = 22;                 // rãnh giữa các ô ảnh
@@ -41,11 +63,11 @@ const FOOT = 78;                // dải chân trang (tên studio)
 const MAX_ANH = 6;              // quá số này thì ô nhỏ tới mức không nhìn ra mặt người
 const RATIO_MAC_DINH = 2 / 3;   // ảnh studio thường là ảnh dọc 2:3 — dùng khi không đọc được kích thước
 
-// Số ô MỘT HÀNG theo số ảnh của nhóm. Hàng thiếu ô được canh giữa, và mọi ô trong
-// cùng một nhóm đều CÙNG KHỔ (như các tấm ảnh in cùng cỡ dán trên một trang).
-// Ảnh ngang thưa hơn ảnh dọc: 3 ảnh ngang một hàng thì mỗi tấm dẹt và bé quá.
-const O_MOI_HANG_DOC   = { 1:1, 2:2, 3:3, 4:2, 5:3, 6:3 };
-const O_MOI_HANG_NGANG = { 1:1, 2:2, 3:2, 4:2, 5:3, 6:3 };
+// Số cột KHÔNG còn tra bảng cứng nữa (xem chonBoCuc). Bảng cũ giữ lại làm mốc
+// đối chiếu khi cần dò lỗi bố cục.
+const O_MOI_HANG_CU_DOC   = { 1:1, 2:2, 3:3, 4:2, 5:3, 6:3 };
+const O_MOI_HANG_CU_NGANG = { 1:1, 2:2, 3:2, 4:2, 5:3, 6:3 };
+const MAX_COT = 4;
 const LA_NGANG = r => r >= 0.95;   // vuông tính là ngang — nó xếp cùng ảnh ngang thì hợp hơn
 
 // ── Đọc kích thước ảnh từ header, không cần thư viện giải mã ảnh ───────────────
@@ -140,14 +162,13 @@ function hinhHoc(tyLes) {
     nhom.push({ idx: chi, ngang: !idxDoc.length });
   }
 
+  const chon = chonBoCuc(nhom, tyLes);
+
   const hang = [];
-  for (const g of nhom) {
-    const m = g.idx.length;
-    const per = (g.ngang ? O_MOI_HANG_NGANG : O_MOI_HANG_DOC)[m] || 3;
-    const cellW = Math.floor((W - 2 * PAD - (per - 1) * GAP) / per);
-    const cellH = Math.round(cellW / trungVi(g.idx.map(i => tyLes[i])));
-    for (let k = 0; k < m; k += per) hang.push({ o: g.idx.slice(k, k + per), cellW, cellH });
-  }
+  nhom.forEach((g, gi) => {
+    const { per, cellW, cellH } = chon[gi];
+    for (let k = 0; k < g.idx.length; k += per) hang.push({ o: g.idx.slice(k, k + per), cellW, cellH });
+  });
 
   const tongO = () => hang.reduce((s, h) => s + h.cellH, 0);
   let H = 2 * PAD + tongO() + (hang.length - 1) * GAP + FOOT;
@@ -156,10 +177,72 @@ function hinhHoc(tyLes) {
     const k = cho / tongO();            // ô dẹt lại nhưng ảnh vẫn `contain` ⇒ KHÔNG cắt, chỉ dư nền hai bên
     hang.forEach(h => { h.cellH = Math.floor(h.cellH * k); });
     H = H_MAX;
-  } else if (H < H_MIN) {               // trang thấp quá → nâng lên 1:1, phần dư thành lề quanh ảnh
+  } else if (H < H_MIN) {               // trang thấp quá → nâng lên mức thấp nhất cho phép
     H = H_MIN;
   }
   return { H, hang };
+}
+
+// ── CHỌN SỐ CỘT: LẤY ẢNH TO NHẤT CÓ THỂ ────────────────────────────────────
+// Trước đây số cột tra từ bảng cứng theo số ảnh. Bảng đó khiến ẢNH NGANG bị
+// thiệt nặng: 6 ảnh ngang xếp 3 cột thì mỗi ô chỉ cao 209px, cả khối ảnh cao
+// 614px trong khi trang tối thiểu 1080 ⇒ gần nửa trang là khoảng trắng, còn
+// ảnh thì bé tí. Chụp ở bội số (SCALE) cũng không cứu nổi, vì thứ thiếu không
+// phải pixel của trang mà là CHỖ dành cho ảnh trong trang.
+//
+// Cách mới: thử mọi số cột từ 1 đến MAX_COT cho từng nhóm, lấy tổ hợp cho
+// TỔNG DIỆN TÍCH HIỂN THỊ của ảnh lớn nhất mà trang vẫn không vượt H_MAX.
+// Diện tích lớn nhất = ảnh to nhất = nét nhất, đúng thứ cần.
+//
+// Cùng bộ 6 ảnh ngang đó, cách mới chọn 2 cột: ô rộng 481 thay vì 313 (+54%),
+// khối ảnh cao 1010 thay vì 614 — trang gần như kín, không còn dải trắng.
+// Với ảnh dọc, cách mới ra đúng bố cục cũ (3 cột cho 5–6 tấm), nên phần đang
+// chạy tốt không bị xáo.
+// ⚠️ Đo bằng diện tích ẢNH HIỂN THỊ, không phải diện tích Ô. Ảnh nằm `contain`
+// trong ô, nên khi trang quá cao và ô bị thu chiều cao, ảnh co theo chiều cao
+// và để dư nền hai bên — lúc đó diện tích ô không còn nói lên ảnh to hay nhỏ.
+// Bản đầu của hàm này đo theo ô và đã chọn sai thật: với 4 ảnh dọc nó bỏ
+// phương án 2 cột (ô 481 rộng, bị thu còn cao 577 ⇒ ảnh 385×577) để lấy 3 cột
+// vừa khít (ảnh 313×470) — nhỏ hơn 42%. Đo đúng thì 2 cột thắng.
+function dienTichAnh(cellW, cellH, r) {   // r = rộng/cao của ảnh
+  const w = Math.min(cellW, cellH * r);
+  return w * (w / r);
+}
+
+function chonBoCuc(nhom, tyLes) {
+  const phuongAn = nhom.map(g => {
+    const m = g.idx.length;
+    const r = trungVi(g.idx.map(i => tyLes[i]));
+    const pa = [];
+    for (let per = 1; per <= Math.min(m, MAX_COT); per++) {
+      const cellW = Math.floor((W - 2 * PAD - (per - 1) * GAP) / per);
+      const cellH = Math.round(cellW / r);
+      pa.push({ per, cellW, cellH, r, m, soHang: Math.ceil(m / per) });
+    }
+    return pa;
+  });
+
+  let tot = null;
+  const duyet = (i, dang) => {
+    if (i === phuongAn.length) {
+      const soHang = dang.reduce((s, o) => s + o.soHang, 0);
+      const tongCao = dang.reduce((s, o) => s + o.soHang * o.cellH, 0);
+      const H = 2 * PAD + tongCao + (soHang - 1) * GAP + FOOT;
+      // Mô phỏng đúng bước thu ở hinhHoc() để đo được ảnh THẬT SỰ ra bao lớn.
+      let k = 1;
+      if (H > H_MAX) {
+        const cho = H_MAX - 2 * PAD - FOOT - (soHang - 1) * GAP;
+        if (cho <= 0) return;            // nhiều hàng tới mức không còn chỗ cho ảnh
+        k = cho / tongCao;
+      }
+      const dienTich = dang.reduce((s, o) => s + o.m * dienTichAnh(o.cellW, o.cellH * k, o.r), 0);
+      if (!tot || dienTich > tot.dienTich) tot = { dienTich, chon: dang.slice() };
+      return;
+    }
+    for (const o of phuongAn[i]) duyet(i + 1, dang.concat(o));
+  };
+  duyet(0, []);
+  return tot.chon;
 }
 
 function dungHtml(files, geo, tenChan, phuChan) {
@@ -288,7 +371,7 @@ async function build(files, opt) {
     fs.writeFileSync(fHtml, dungHtml(dung, geo, tenChan, phuChan), 'utf8');
     const r = cp.spawnSync(chrome, [
       '--headless=new', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage',
-      '--hide-scrollbars', '--force-device-scale-factor=1',
+      '--hide-scrollbars', `--force-device-scale-factor=${SCALE}`,
       '--allow-file-access-from-files',          // để canvas đọc được ảnh file:// mà tính màu nền
       '--virtual-time-budget=20000',             // chờ ảnh nạp + script đổi màu xong mới chụp
       `--window-size=${W},${geo.H}`,
@@ -301,19 +384,22 @@ async function build(files, opt) {
     }
 
     // PNG ảnh chụp rất nặng; Facebook chặn ảnh quá lớn. Có ffmpeg thì đổi sang JPEG.
+    // -q:v 1 là nấc nén nhẹ nhất của ffmpeg. Cố ý chọn nấc cao nhất: Facebook sẽ
+    // nén thêm một lần nữa sau khi nhận, nên mọi chi tiết mất ở bước này là mất
+    // vĩnh viễn, còn vài trăm KB dôi ra thì chỉ tốn đường truyền một lần.
     let out = fPng, tenOut = 'photobook.png';
     const ff = timFfmpeg();
     if (ff) {
-      const c = cp.spawnSync(ff, ['-y', '-loglevel', 'error', '-i', fPng, '-q:v', '2', fJpg],
+      const c = cp.spawnSync(ff, ['-y', '-loglevel', 'error', '-i', fPng, '-q:v', '1', fJpg],
         { timeout: 120000, stdio: 'ignore' });
       if (c.status === 0 && fs.existsSync(fJpg) && fs.statSync(fJpg).size > 5000) { out = fJpg; tenOut = 'photobook.jpg'; }
     }
     const kb = Math.round(fs.statSync(out).size / 1024);
-    if (fs.statSync(out).size > 3.8 * 1024 * 1024) {
-      ghi(`     ! trang ghép nặng ${kb}KB (>3.8MB) → giữ nguyên kiểu đăng nhiều ảnh cho chắc`);
+    if (fs.statSync(out).size > TRAN_MB * 1024 * 1024) {
+      ghi(`     ! trang ghép nặng ${kb}KB (>${TRAN_MB}MB) → giữ nguyên kiểu đăng nhiều ảnh cho chắc`);
       return files;
     }
-    ghi(`     ▣ dàn trang photobook: ${dung.length} ảnh → 1 tấm ${W}×${geo.H} (${kb}KB)`);
+    ghi(`     ▣ dàn trang photobook: ${dung.length} ảnh → 1 tấm ${W*SCALE}×${geo.H*SCALE} (${kb}KB)`);
     return [{ path: out, name: tenOut }];
   } catch (e) {
     ghi(`     ! dàn trang lỗi: ${String(e.message || e).slice(0, 140)} → giữ nguyên kiểu đăng nhiều ảnh`);
