@@ -19,6 +19,11 @@
  *   LARK_TABLE_ID     (bắt buộc)  — mã bảng Đăng bài (tbl...)               = GitHub Variable TABLE_DANGBAI
  *   PAGES_TABLE_ID    (bắt buộc)  — mã bảng Pages (tbl...)                  = GitHub Variable TABLE_PAGES
  * Tùy chọn: LARK_DOMAIN, GRAPH_VERSION, RESPECT_SCHEDULE (đặt "false" để bỏ qua Lịch đăng).
+ * Giữ nhịp (xem khối GIỮ ĐÚNG GIỜ, KHÔNG ĐĂNG DỒN bên dưới):
+ *   GRACE_MINUTES     (mặc định 90)  — trễ hơn bấy nhiêu phút thì thôi, không đăng lệch khung giờ
+ *   MAX_FAIL          (mặc định 3)   — hỏng đủ bấy nhiêu lần thì ngưng thử lại
+ *   MAX_VIDEO_MB      (mặc định 100) — video nặng hơn thì chặn từ đầu (Facebook trả 413)
+ *   MOT_BAI_MOI_PAGE  ("false" để tắt) — mỗi lượt chạy, mỗi page chỉ đăng 1 bài
  * Token Facebook lấy TỪ bảng Pages (cột access_token) — không cần env FB.
  */
 'use strict';
@@ -35,6 +40,11 @@ const CFG = {
   LARK_DOMAIN:  process.env.LARK_DOMAIN    || 'https://open.larksuite.com',
   GRAPH_VERSION:process.env.GRAPH_VERSION  || 'v21.0',
   RESPECT_SCHEDULE: process.env.RESPECT_SCHEDULE !== 'false',
+  // ── Ba con số giữ nhịp đăng (xem khối GIỮ ĐÚNG GIỜ, KHÔNG ĐĂNG DỒN bên dưới) ──
+  GRACE_MIN:    +(process.env.GRACE_MINUTES  || 90),   // trễ quá bấy nhiêu phút thì THÔI, không đăng lệch khung giờ
+  MAX_FAIL:     +(process.env.MAX_FAIL       || 3),    // thất bại đủ bấy nhiêu lần thì ngưng, không thử lại nữa
+  MAX_VIDEO_MB: +(process.env.MAX_VIDEO_MB   || 100),  // video nặng hơn mức này Facebook chắc chắn trả 413
+  MOT_BAI_MOI_PAGE: process.env.MOT_BAI_MOI_PAGE !== 'false',  // mỗi lượt chạy, mỗi page chỉ đăng 1 bài
 };
 const GRAPH = `https://graph.facebook.com/${CFG.GRAPH_VERSION}`;
 const DRY = process.argv.includes('--dry-run');
@@ -72,6 +82,45 @@ const DONE = 'Thành công', FAIL = 'Thất bại';
 //
 // Dòng kẹt dấu ĐANG ĐĂNG (lượt chạy chết giữa chừng) được nhả sau CLAIM_TTL để
 // không kẹt vĩnh viễn.
+// ── GIỮ ĐÚNG GIỜ, KHÔNG ĐĂNG DỒN ───────────────────────────────────────────
+// Sự cố thật (11/08/2026, page Bầu): 4 video hẹn 10/08 18:00 · 11/08 08:00 ·
+// 12:00 · 18:00 cùng lên sóng trong 2 phút 16 giây lúc 21:31–21:34 tối. Bài ẢNH
+// cùng ngày lên đúng giờ, chỉ VIDEO bị dồn.
+//
+// Chuỗi nhân quả (dò từ record-history của Lark):
+//   4 video nặng 148–170MB → Facebook trả 413 Payload Too Large
+//   → engine cũ chỉ bỏ qua dòng "Thành công", nên dòng "Thất bại" bị thử lại
+//     VÔ HẠN mỗi 15 phút suốt 9 ngày (~3.400 lần đẩy file 150MB)
+//   → Facebook đếm cả lần hỏng vào hạn mức tần suất của Page ⇒ bật chống spam
+//     ("Để bảo vệ cộng đồng khỏi spam, chúng tôi giới hạn tần suất bạn đăng bài")
+//   → video HỢP LỆ theo lịch bị đá ra suốt cả ngày, nằm dồn kho
+//   → 21:31 Facebook hạ chặn ⇒ cả kho xả một lượt.
+//
+// Bốn chốt chặn, mỗi chốt cắt một mắt xích:
+//   ① QUÁ HẠN  — trễ hơn GRACE_MIN phút thì KHÔNG đăng nữa. Bài hẹn 8h sáng
+//                không bao giờ tự nhảy ra lúc 9h30 tối. Đây là chốt trả lại
+//                đúng nghĩa cho cột "Lịch đăng bài".
+//   ② NGƯNG    — thất bại đủ MAX_FAIL lần thì thôi. Hết cảnh một video hỏng
+//                đập cửa Facebook mãi mãi rồi kéo cả hệ vào diện nghi spam.
+//   ③ CHẶN NẶNG— video quá MAX_VIDEO_MB bị chặn TRƯỚC khi tải về, không tốn
+//                một lần gọi Facebook nào. 413 là chắc chắn, thử là phí.
+//   ④ GIÃN NHỊP— mỗi lượt chạy, mỗi page chỉ đăng 1 bài. Cron 15 phút ⇒ hai bài
+//                cùng page luôn cách nhau ít nhất 15 phút, không bao giờ dính
+//                chùm. (Engine Instagram đã giãn 30 phút từ commit 8ae37ae.)
+//
+// Cả 4 chốt đều được BỎ QUA khi chạy một dòng cụ thể qua RECORD_ID (người dùng
+// bấm nút "Đăng") — bấm nút là ý muốn rõ ràng của con người, engine không cãi.
+// Đó cũng là cách gỡ dấu NGƯNG cho một dòng: sửa file rồi bấm nút.
+const NGUNG = '[NGƯNG]';
+const QUA_HAN = '[QUÁ HẠN]';
+const FAIL_RE = /\[thử (\d+)\/\d+\]/;
+const demThu = t => +(String(t||'').match(FAIL_RE)||[])[1] || 0;
+// Hậu tố đánh vào Log mỗi lần đăng hỏng; chạm trần thì đóng dấu NGƯNG luôn.
+function dauLanThu(logCu){
+  const n = demThu(logCu) + 1;
+  return ` [thử ${n}/${CFG.MAX_FAIL}]` + (n >= CFG.MAX_FAIL ? ` ${NGUNG}` : '');
+}
+
 const CLAIM_TTL_MS = 20 * 60 * 1000;
 const RUN_TAG = process.env.GITHUB_RUN_ID
   ? `run${process.env.GITHUB_RUN_ID}.${process.env.GITHUB_RUN_ATTEMPT || 1}`
@@ -79,7 +128,11 @@ const RUN_TAG = process.env.GITHUB_RUN_ID
 const CLAIM_RE = /ĐANG ĐĂNG \(([^)]+)\)/;
 
 // Dòng Log lúc giành chỗ — có cả giờ để biết claim cũ đã thiu chưa.
-const claimLine = () => `${now()} - ĐANG ĐĂNG (${RUN_TAG})`;
+// Mang theo dấu [thử n/N] của log cũ, kẻo ghi đè xong là mất số lần đã thử.
+const claimLine = (logCu) => {
+  const m = String(logCu||'').match(FAIL_RE);
+  return `${now()} - ĐANG ĐĂNG (${RUN_TAG})` + (m ? ` ${m[0]}` : '');
+};
 
 // Claim này còn hiệu lực không? (còn hạn = lượt khác đang làm thật, phải nhường)
 function claimConHan(logText) {
@@ -219,10 +272,14 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
   const rows=await listAll(tk, CFG.TABLE_ID);
   // Nếu Automation gửi RECORD_ID (dòng vừa bấm nút) → chỉ xử lý đúng dòng đó; trống → quét cả bảng.
   const only=(process.env.RECORD_ID||'').trim();
-  const scan=only?rows.filter(r=>r.record_id===only):rows;
-  if(only) log(`Chỉ xử lý RECORD_ID=${only} (${scan.length} dòng khớp).`);
+  // Xếp theo giờ hẹn tăng dần: bài tới hạn sớm nhất được ưu tiên suất đăng của lượt này.
+  const scan=(only?rows.filter(r=>r.record_id===only):rows.slice())
+    .sort((a,b)=>(scheduleMs(a.fields[F.schedule])??Infinity)-(scheduleMs(b.fields[F.schedule])??Infinity));
+  if(only) log(`Chỉ xử lý RECORD_ID=${only} (${scan.length} dòng khớp) — bỏ qua mọi chốt giữ nhịp.`);
+  else log(`Giữ nhịp: quá hạn ${CFG.GRACE_MIN}' thì thôi · ngưng sau ${CFG.MAX_FAIL} lần hỏng · video ≤ ${CFG.MAX_VIDEO_MB}MB · ${CFG.MOT_BAI_MOI_PAGE?'1 bài/page mỗi lượt':'không giới hạn bài/lượt'}.`);
   const nowMs=Date.now();
-  let ok=0,err=0,wait=0,skip=0;
+  const daDangLuotNay=new Set();   // fbId đã chạm tới ở lượt chạy này → nhường lượt sau
+  let ok=0,err=0,wait=0,skip=0,quaHan=0,ngung=0,gian=0;
   for(const row of scan){
     const recId=row.record_id;
     if(plain(row.fields[F.status])===DONE) { skip++; continue; }              // đã đăng
@@ -234,12 +291,54 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
     for(const prId of pageRecIds){ const pg=pageMap.get(prId); if(pg&&pg.fbId&&pg.token) pages.push(pg); else missing.push(prId); }
     if(!pages.length){ log(`  [LỖI] ${recId}: không Page nào có ID/token trong bảng Pages`); if(!DRY)await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - Page thiếu ID/token`}); err++; continue; }
 
-    if(CFG.RESPECT_SCHEDULE){ const s=scheduleMs(row.fields[F.schedule]); if(s&&s>nowMs){ log(`  [CHỜ GIỜ] ${recId}: hẹn ${new Date(s).toISOString().slice(0,16)}`); wait++; continue; } }
+    const logCu = plain(row.fields[F.log]);
+
+    // ② NGƯNG — dòng đã hỏng đủ MAX_FAIL lần thì thôi, đừng nã Facebook nữa.
+    if(!only && logCu.includes(NGUNG)){ ngung++; continue; }
+
+    if(CFG.RESPECT_SCHEDULE){
+      const s=scheduleMs(row.fields[F.schedule]);
+      if(s&&s>nowMs){ log(`  [CHỜ GIỜ] ${recId}: hẹn ${new Date(s).toISOString().slice(0,16)}`); wait++; continue; }
+      // ① QUÁ HẠN — trễ quá lâu thì đăng ra cũng lệch khung giờ, thà không đăng.
+      // Sửa lại "Lịch đăng bài" sang giờ mới (hoặc bấm nút Đăng) là dòng sống lại.
+      if(s && !only && CFG.GRACE_MIN>0 && (nowMs-s) > CFG.GRACE_MIN*60000){
+        const tre=Math.round((nowMs-s)/60000);
+        log(`  [QUÁ HẠN] ${recId}: hẹn ${new Date(s).toISOString().slice(0,16)}, trễ ${tre} phút (trần ${CFG.GRACE_MIN}) — không đăng lệch giờ`);
+        if(!DRY && !logCu.includes(QUA_HAN)){
+          try{ await updateRow(tk,recId,{[F.log]:`${now()} - ${QUA_HAN} trễ ${tre} phút so với lịch, không đăng tự động nữa. Muốn đăng: sửa "Lịch đăng bài" sang giờ mới, hoặc bấm nút Đăng.`}); }catch{}
+        }
+        quaHan++; continue;
+      }
+    }
+
+    // Biết sớm là ảnh hay video để chặn video quá nặng TRƯỚC khi tốn công tải file.
+    const loai=plain(row.fields[F.type]);
+    let kind = /video/i.test(loai) ? 'video' : /ảnh|hình|image|photo/i.test(loai) ? 'image' : (atts.some(isVid)?'video':'image');
+    const files = kind==='video' ? [ atts.find(isVid)||atts[0] ] : atts.filter(a=>isImg(a)||!isVid(a));
+
+    // ③ CHẶN NẶNG — Facebook trả 413 với video vượt cỡ. Thử là chắc chắn hỏng,
+    // mà mỗi lần hỏng vẫn bị tính vào hạn mức tần suất của Page ⇒ chặn từ đây.
+    if(kind==='video' && CFG.MAX_VIDEO_MB>0){
+      const mb=(files[0]&&files[0].size||0)/1048576;
+      if(mb > CFG.MAX_VIDEO_MB){
+        const msg=`video ${mb.toFixed(1)}MB vượt trần ${CFG.MAX_VIDEO_MB}MB — Facebook sẽ từ chối (413). Nén nhẹ lại rồi thay file, xong bấm nút Đăng.`;
+        log(`  [BỎ] ${recId}: ${msg}`);
+        if(!DRY){ try{ await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - LỖI - ${msg} ${NGUNG}`}); }catch{} }
+        err++; continue;
+      }
+    }
+
+    // ④ GIÃN NHỊP — mỗi lượt chạy, mỗi page chỉ một bài. Cron 15 phút ⇒ hai bài
+    // cùng page cách nhau ít nhất 15 phút, không bao giờ ra thành chùm.
+    if(!only && CFG.MOT_BAI_MOI_PAGE && pages.some(p=>daDangLuotNay.has(p.fbId))){
+      log(`  [GIÃN NHỊP] ${recId}: ${pages.map(p=>p.name).join(', ')} đã có bài ở lượt này — để lượt sau`);
+      gian++; continue;
+    }
 
     // ── GIÀNH CHỖ (xem ghi chú CHỐNG ĐĂNG TRÙNG ở đầu file) ──
     // Làm SAU mọi phép kiểm rẻ tiền ở trên, ngay TRƯỚC khi đụng vào Facebook.
     if(!DRY){
-      const logHienTai = plain(row.fields[F.log]);
+      const logHienTai = logCu;
       if(claimConHan(logHienTai)){
         log(`  [NHƯỜNG] ${recId}: lượt chạy khác đang đăng dòng này (${(logHienTai.match(CLAIM_RE)||[])[1]||'?'})`);
         skip++; continue;
@@ -250,7 +349,7 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
         // lại sẽ ra bài trùng. Gặp dòng này nên mở page kiểm bằng mắt.
         log(`  [⚠ NHẬN LẠI] ${recId}: kẹt dấu ĐANG ĐĂNG quá ${CLAIM_TTL_MS/60000} phút — kiểm page xem đã có bài chưa!`);
       }
-      try{ await updateRow(tk,recId,{[F.log]:claimLine()}); }
+      try{ await updateRow(tk,recId,{[F.log]:claimLine(logHienTai)}); }
       catch(e){ log(`  [LỖI] ${recId}: không giành chỗ được - ${String(e.message||e).slice(0,120)}`); err++; continue; }
 
       // Đọc lại để chắc dấu còn là của mình. Hai lượt cùng ghi trong tích tắc
@@ -264,10 +363,12 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
     }
 
     const caption=plain(row.fields[F.caption]);
-    const loai=plain(row.fields[F.type]);
-    let kind = /video/i.test(loai) ? 'video' : /ảnh|hình|image|photo/i.test(loai) ? 'image' : (atts.some(isVid)?'video':'image');
-    const files = kind==='video' ? [ atts.find(isVid)||atts[0] ] : atts.filter(a=>isImg(a)||!isVid(a));
     log(`  >> ${recId} | ${pages.map(p=>p.name).join(', ')} | ${kind} | ${files.length} file | "${caption.slice(0,40).replace(/\n/g,' ')}"`);
+    // Ghi sổ NGAY, trước cả khi biết kết quả: đã chạm tới page này ở lượt chạy
+    // hiện tại thì thôi, không nã tiếp — kể cả khi bài này hỏng. Đang bị Facebook
+    // chặn tần suất mà cứ thử bài kế tiếp thì chỉ chặn nặng thêm.
+    // Đặt trước nhánh DRY để chạy thử khô cũng thấy đúng nhịp thật.
+    pages.forEach(p=>daDangLuotNay.add(p.fbId));
     if(DRY){ const c=plain(row.fields[F.comment]).trim(); if(c)log(`     [DRY] comment: ${c.slice(0,60)}`); continue; }
 
     const tmp=[];
@@ -294,11 +395,11 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
       const firstOk=results.find(r=>r.ok);
       const logLine=results.map(r=>r.ok?`${r.name}: OK ${r.objectId}${r.cmtNote||''}`:`${r.name}: LỖI ${r.error}`).join(' | ');
       await updateRow(tk,recId,{ [F.status]: anyOk?DONE:FAIL, ...(firstOk?{[F.linkPost]:{link:firstOk.permalink,text:'Xem bài'}}:{}),
-        [F.log]:`${now()} - ${allOk?'OK':'MỘT PHẦN'} - ${logLine}` });
+        [F.log]:`${now()} - ${allOk?'OK':'MỘT PHẦN'} - ${logLine}` + (anyOk?'':dauLanThu(logCu)) });
       if(anyOk) ok++; else err++;
     }catch(e){ const msg=String(e.message||e).slice(0,300); log(`     ✖ LỖI: ${msg}`);
-      try{await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - LỖI - ${msg}`});}catch{} err++;
+      try{await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - LỖI - ${msg}`+dauLanThu(logCu)});}catch{} err++;
     }finally{ tmp.forEach(p=>{try{fs.unlinkSync(p)}catch{}}); }
   }
-  log(`Xong. Đăng: ${ok}, Lỗi: ${err}, Chờ giờ: ${wait}, Bỏ qua: ${skip}.`);
+  log(`Xong. Đăng: ${ok}, Lỗi: ${err}, Chờ giờ: ${wait}, Giãn nhịp: ${gian}, Quá hạn: ${quaHan}, Đã ngưng: ${ngung}, Bỏ qua: ${skip}.`);
 })().catch(e=>{console.error('FATAL',e.message||e);process.exit(1);});
