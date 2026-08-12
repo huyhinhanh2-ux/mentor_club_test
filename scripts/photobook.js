@@ -48,7 +48,19 @@ const fs = require('fs'), os = require('os'), path = require('path'), cp = requi
 // Vì sao dừng ở 2 mà không lên 3: Facebook hạ mọi ảnh feed về tối đa 2048px
 // cạnh dài. 2160 hạ xuống 2048 là mất 5% — không thấy được. Còn 3240px thì
 // tốn gấp rưỡi thời gian và bộ nhớ để rồi cũng bị hạ về đúng 2048.
-const SCALE = Math.max(1, +(process.env.PHOTOBOOK_SCALE || 2));
+// ĐO THẬT 12/08/2026 trên chính page Bầu (upload published=false → đọc field
+// `images` → xoá): gửi lên 2160×2362, 3240×3543 và 4320×4724, Facebook đều lưu
+// đúng MỘT bản 1873×2048. Tức là nó hạ mọi ảnh về CẠNH DÀI 2048, không hơn.
+//
+// Hai điều rút ra, cả hai đều đổi cách làm:
+//  · Chụp to hơn 2048 là phí — và còn HẠI: bản 2160 phải qua một lần Facebook
+//    thu nhỏ, mỗi lần thu là một lần làm mềm chi tiết. Nên nhắm ĐÚNG 2048.
+//  · Trang càng CAO thì bề ngang thật càng hẹp (cạnh dài bị ghim ở 2048): trang
+//    1080×1350 chỉ còn bề ngang 1638px, trong khi trang 1080×1080 được trọn
+//    2048px. Bố cục vì thế phải tính theo pixel THẬT trên Facebook, không phải
+//    theo pixel trong bản vẽ — xem chonBoCuc().
+const CANH_DAI_FB = +(process.env.PHOTOBOOK_CANH_DAI || 2048);
+const SCALE_EP = +(process.env.PHOTOBOOK_SCALE || 0);   // >0 để ép tay, 0 = tự nhắm đúng 2048
 const TRAN_MB = +(process.env.PHOTOBOOK_MAX_MB || 8);   // trần dung lượng trang ghép
 
 const W = 1080;                 // bề ngang trang, cố định — đúng bề ngang ảnh feed Facebook
@@ -57,9 +69,11 @@ const W = 1080;                 // bề ngang trang, cố định — đúng b�
 // thiếu trở thành dải trắng trên–dưới chứ không thành ảnh to hơn.
 const H_MIN = 864;
 const H_MAX = 1350;             // 4:5  — cao nhất Facebook cho phép, quá nữa là bị cắt
-const PAD = 48;                 // lề ngoài trang
-const GAP = 22;                 // rãnh giữa các ô ảnh
-const FOOT = 78;                // dải chân trang (tên studio)
+// Lề, rãnh, chân trang: mỗi pixel dành cho chúng là một pixel lấy khỏi ảnh.
+// Thu lại vừa đủ để trang vẫn thoáng mà ảnh to thêm ~6%. (Trước: 48 · 22 · 78.)
+const PAD = 28;                 // lề ngoài trang
+const GAP = 14;                 // rãnh giữa các ô ảnh
+const FOOT = 64;                // dải chân trang (tên studio)
 const MAX_ANH = 6;              // quá số này thì ô nhỏ tới mức không nhìn ra mặt người
 const RATIO_MAC_DINH = 2 / 3;   // ảnh studio thường là ảnh dọc 2:3 — dùng khi không đọc được kích thước
 
@@ -235,7 +249,13 @@ function chonBoCuc(nhom, tyLes) {
         if (cho <= 0) return;            // nhiều hàng tới mức không còn chỗ cho ảnh
         k = cho / tongCao;
       }
-      const dienTich = dang.reduce((s, o) => s + o.m * dienTichAnh(o.cellW, o.cellH * k, o.r), 0);
+      // Quy về PIXEL THẬT TRÊN FACEBOOK. Facebook ghim cạnh dài ở 2048, nên một
+      // ô rộng 481 nằm trong trang cao 1181 chỉ còn 481/1181×2048 = 834px thật;
+      // cũng ô đó trong trang cao 1080 được 912px. Không qua bước quy đổi này
+      // thì thuật toán sẽ thích những bố cục cao — vốn tự bóp nhỏ chính nó.
+      const Hthuc = Math.max(H_MIN, Math.min(H_MAX, H));
+      const quy = CANH_DAI_FB / Math.max(W, Hthuc);
+      const dienTich = dang.reduce((s, o) => s + o.m * dienTichAnh(o.cellW * quy, o.cellH * k * quy, o.r), 0);
       if (!tot || dienTich > tot.dienTich) tot = { dienTich, chon: dang.slice() };
       return;
     }
@@ -367,11 +387,16 @@ async function build(files, opt) {
   const fJpg = path.join(os.tmpdir(), `pb_${nen}_${process.pid}.jpg`);
   tmp.push(fHtml, fPng, fJpg);
 
+  // Nhắm ĐÚNG khổ Facebook giữ lại: cạnh dài thành đúng 2048, không thừa không
+  // thiếu. Thừa thì Facebook thu xuống (thêm một lần làm mềm chi tiết vô ích),
+  // thiếu thì tự bỏ phí độ nét được phép có.
+  const SCALE = SCALE_EP > 0 ? SCALE_EP : CANH_DAI_FB / Math.max(W, geo.H);
+
   try {
     fs.writeFileSync(fHtml, dungHtml(dung, geo, tenChan, phuChan), 'utf8');
     const r = cp.spawnSync(chrome, [
       '--headless=new', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage',
-      '--hide-scrollbars', `--force-device-scale-factor=${SCALE}`,
+      '--hide-scrollbars', `--force-device-scale-factor=${SCALE.toFixed(4)}`,
       '--allow-file-access-from-files',          // để canvas đọc được ảnh file:// mà tính màu nền
       '--virtual-time-budget=20000',             // chờ ảnh nạp + script đổi màu xong mới chụp
       `--window-size=${W},${geo.H}`,
@@ -383,23 +408,30 @@ async function build(files, opt) {
       return files;
     }
 
-    // PNG ảnh chụp rất nặng; Facebook chặn ảnh quá lớn. Có ffmpeg thì đổi sang JPEG.
-    // -q:v 1 là nấc nén nhẹ nhất của ffmpeg. Cố ý chọn nấc cao nhất: Facebook sẽ
-    // nén thêm một lần nữa sau khi nhận, nên mọi chi tiết mất ở bước này là mất
-    // vĩnh viễn, còn vài trăm KB dôi ra thì chỉ tốn đường truyền một lần.
+    // ĐẾM SỐ LẦN NÉN. Facebook luôn nén lại ảnh nhận được — đó là một lần không
+    // tránh khỏi. Nếu ta gửi JPEG thì thành HAI lần nén chồng nhau, và lần nào
+    // cũng ăn vào chi tiết da, tóc, vải — đúng những thứ ảnh studio sống nhờ.
+    // PNG không nén mất dữ liệu, nên gửi PNG là để Facebook nén ĐÚNG MỘT LẦN,
+    // từ bản gốc sạch. Chỉ khi PNG vượt trần mới hạ xuống JPEG nấc nhẹ nhất.
     let out = fPng, tenOut = 'photobook.png';
-    const ff = timFfmpeg();
-    if (ff) {
-      const c = cp.spawnSync(ff, ['-y', '-loglevel', 'error', '-i', fPng, '-q:v', '1', fJpg],
-        { timeout: 120000, stdio: 'ignore' });
-      if (c.status === 0 && fs.existsSync(fJpg) && fs.statSync(fJpg).size > 5000) { out = fJpg; tenOut = 'photobook.jpg'; }
+    const pngMb = fs.statSync(fPng).size / 1048576;
+    if (pngMb > TRAN_MB) {
+      const ff = timFfmpeg();
+      if (ff) {
+        const c = cp.spawnSync(ff, ['-y', '-loglevel', 'error', '-i', fPng, '-q:v', '1', fJpg],
+          { timeout: 120000, stdio: 'ignore' });
+        if (c.status === 0 && fs.existsSync(fJpg) && fs.statSync(fJpg).size > 5000) {
+          out = fJpg; tenOut = 'photobook.jpg';
+          ghi(`     · PNG ${pngMb.toFixed(1)}MB vượt trần ${TRAN_MB}MB → JPEG nấc nhẹ nhất (${(fs.statSync(fJpg).size/1048576).toFixed(1)}MB)`);
+        }
+      }
     }
     const kb = Math.round(fs.statSync(out).size / 1024);
     if (fs.statSync(out).size > TRAN_MB * 1024 * 1024) {
       ghi(`     ! trang ghép nặng ${kb}KB (>${TRAN_MB}MB) → giữ nguyên kiểu đăng nhiều ảnh cho chắc`);
       return files;
     }
-    ghi(`     ▣ dàn trang photobook: ${dung.length} ảnh → 1 tấm ${W*SCALE}×${geo.H*SCALE} (${kb}KB)`);
+    ghi(`     ▣ dàn trang photobook: ${dung.length} ảnh → 1 tấm ${Math.round(W*SCALE)}×${Math.round(geo.H*SCALE)} ${tenOut.endsWith('png')?'PNG':'JPEG'} (${kb}KB)`);
     return [{ path: out, name: tenOut }];
   } catch (e) {
     ghi(`     ! dàn trang lỗi: ${String(e.message || e).slice(0, 140)} → giữ nguyên kiểu đăng nhiều ảnh`);
