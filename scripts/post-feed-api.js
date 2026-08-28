@@ -115,6 +115,24 @@ const DONE = 'Thành công', FAIL = 'Thất bại';
 // Cả 4 chốt đều được BỎ QUA khi chạy một dòng cụ thể qua RECORD_ID (người dùng
 // bấm nút "Đăng") — bấm nút là ý muốn rõ ràng của con người, engine không cãi.
 // Đó cũng là cách gỡ dấu NGƯNG cho một dòng: sửa file rồi bấm nút.
+// ── PAGE BỊ FACEBOOK KHOÁ ĐĂNG VIDEO ───────────────────────────────────────
+// Chuyện thật, kéo dài 17 ngày mà không ai biết (11/08 → 28/08/2026): page Bầu
+// đăng ẢNH vẫn bình thường nhưng mọi VIDEO đều trượt. Đo tay mới ra: Facebook
+// trả code 368 / subcode 1390008 — mã của "tạm khoá vì vi phạm chính sách",
+// KHÔNG phải nghẽn tần suất, dù lời văn nói y như nghẽn tần suất. Cùng file đó
+// đẩy sang page Newborn thì lên ngay ⇒ không phải lỗi engine, lỗi file hay token.
+// Cả hai đường /videos và /video_reels đều bị chặn ⇒ khoá áp cho cả tính năng
+// video của page, không có đường vòng nào.
+//
+// Với mã này, thử lại là VÔ ÍCH và có hại — mỗi lần thử là thêm một lần Facebook
+// thấy hành vi lặp, có thể kéo dài thời gian khoá. Nên:
+//   · Page nào trả 368 thì CẢ LƯỢT CHẠY không đụng tới video của page đó nữa.
+//   · Lỗi này KHÔNG tính vào bộ đếm NGƯNG — nó không phải lỗi của dòng bài. Ngày
+//     Facebook mở khoá, dòng phải tự đăng được mà không cần ai bấm gì.
+const KHOA_CHINH_SACH = 368;
+const laKhoaChinhSach = e => e && (e.fbCode === KHOA_CHINH_SACH || e.fbSub === 1390008);
+const NHAN_KHOA = '[FB KHOÁ VIDEO 368]';
+
 const NGUNG = '[NGƯNG]';
 const QUA_HAN = '[QUÁ HẠN]';
 const FAIL_RE = /\[thử (\d+)\/\d+\]/;
@@ -206,8 +224,22 @@ async function downloadMedia(tk, fileToken, out) {
     if (r.ok && (r.headers.get('content-type')||'').indexOf('json')<0) { const b=Buffer.from(await r.arrayBuffer()); fs.writeFileSync(out,b); return b.length; } }
   throw new Error('không tải được media từ Lark');
 }
+// ⚠️ MÃ LỖI PHẢI ĐỨNG ĐẦU THÔNG ĐIỆP. Bản cũ ném ra 'FB 400: {"message":"Để bảo
+// vệ cộng đồng khỏi spam..."}' — cột Log lại cắt ở 200 ký tự, mà `code` nằm SAU
+// `message` trong JSON của Facebook ⇒ mã bị cắt mất. Hậu quả thật: từ 11/08 đến
+// 28/08/2026, page Bầu bị Facebook KHOÁ TÍNH NĂNG VIDEO (code 368) suốt 17 ngày
+// mà trong Log chỉ đọc được câu "giới hạn tần suất, thử lại sau" — nghe như nghẽn
+// nhất thời nên không ai đi tìm, trong khi 368 là chuyện hoàn toàn khác và phải
+// xử lý bằng tay trên Facebook. Nay mã đứng trước, có cắt cũng không mất.
 async function fbFetch(u,o){ const r=await fetch(u,o); const t=await r.text(); let j; try{j=JSON.parse(t)}catch{j={_raw:t}}
-  if(!r.ok||j.error)throw new Error('FB '+r.status+': '+JSON.stringify(j.error||j._raw||j)); return j; }
+  if(!r.ok||j.error){
+    const e0=j.error||{};
+    const ma=e0.code!=null ? `code ${e0.code}${e0.error_subcode!=null?'/'+e0.error_subcode:''}` : 'không rõ mã';
+    const err=new Error(`FB ${r.status} (${ma}): ${e0.message||JSON.stringify(j._raw||j).slice(0,200)}`);
+    err.fbCode=e0.code; err.fbSub=e0.error_subcode;
+    throw err;
+  }
+  return j; }
 
 // Đăng feed ảnh: 1 ảnh → /photos (published mặc định=true, hiện thẳng feed công khai).
 // Nhiều ảnh → upload từng ảnh (published=false) → media_fbid → tạo post /feed đính kèm.
@@ -335,7 +367,7 @@ function scheduleMs(cell){ if(cell==null)return null; if(typeof cell==='number')
 // Nhờ vậy kiểm được luồng upload nhiều chặng bằng chính hàm thật (chạy start +
 // transfer rồi DỪNG, không finish ⇒ không bài nào lên sóng), thay vì chép tay
 // một bản mô phỏng rồi đinh ninh là giống.
-module.exports = { uploadVideoNhieuChang, postVideo, larkToken, listAll, downloadMedia, plain, NGUONG_PHAN_MANH };
+module.exports = { uploadVideoNhieuChang, postVideo, fbFetch, laKhoaChinhSach, larkToken, listAll, downloadMedia, plain, NGUONG_PHAN_MANH };
 if (require.main !== module) return;
 
 (async()=>{
@@ -362,7 +394,8 @@ if (require.main !== module) return;
   else log(`Giữ nhịp: quá hạn ${CFG.GRACE_MIN}' thì thôi · ngưng sau ${CFG.MAX_FAIL} lần hỏng · video ≤ ${CFG.MAX_VIDEO_MB}MB · ${CFG.MOT_BAI_MOI_PAGE?'1 bài/page mỗi lượt':'không giới hạn bài/lượt'}.`);
   const nowMs=Date.now();
   const daDangLuotNay=new Set();   // fbId đã chạm tới ở lượt chạy này → nhường lượt sau
-  let ok=0,err=0,wait=0,skip=0,quaHan=0,ngung=0,gian=0;
+  const pageKhoaVideo=new Set();   // fbId Facebook đang khoá đăng video (code 368)
+  let ok=0,err=0,wait=0,skip=0,quaHan=0,ngung=0,gian=0,khoa=0;
   for(const row of scan){
     const recId=row.record_id;
     if(plain(row.fields[F.status])===DONE) { skip++; continue; }              // đã đăng
@@ -409,6 +442,12 @@ if (require.main !== module) return;
         if(!DRY){ try{ await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - LỖI - ${msg} ${NGUNG}`}); }catch{} }
         err++; continue;
       }
+    }
+
+    // Page đang bị Facebook khoá video ở lượt này → đừng gõ cửa nữa.
+    if(kind==='video' && pages.length && pages.every(p=>pageKhoaVideo.has(p.fbId))){
+      log(`  [FB KHOÁ] ${recId}: ${pages.map(p=>p.name).join(', ')} đang bị khoá đăng video — bỏ qua, không thử thêm`);
+      khoa++; continue;
     }
 
     // ④ GIÃN NHỊP — mỗi lượt chạy, mỗi page chỉ một bài. Cron 15 phút ⇒ hai bài
@@ -471,18 +510,30 @@ if (require.main !== module) return;
             catch(e){ cmtNote=' (cmt lỗi)'; log(`     ! comment lỗi (${pg.name}): ${String(e.message||e).slice(0,120)}`); } }
           results.push({ name:pg.name, ok:true, permalink:res.permalink, objectId:res.objectId, cmtNote });
           log(`     ✔ ĐĂNG ${pg.name}: ${res.permalink}`);
-        }catch(e){ const msg=String(e.message||e).slice(0,200); results.push({ name:pg.name, ok:false, error:msg }); log(`     ✖ LỖI ${pg.name}: ${msg}`); }
+        }catch(e){ const msg=String(e.message||e).slice(0,200);
+          const khoaVideo = laKhoaChinhSach(e) && kind==='video';
+          if(khoaVideo){ pageKhoaVideo.add(pg.fbId);
+            log(`     ⛔ ${pg.name}: FACEBOOK ĐANG KHOÁ ĐĂNG VIDEO (code 368) — không thử lại, chờ Facebook mở`); }
+          else log(`     ✖ LỖI ${pg.name}: ${msg}`);
+          results.push({ name:pg.name, ok:false, error:msg, khoaVideo }); }
       }
       if(missing.length) results.push(...missing.map(id=>({ name:id, ok:false, error:'Page thiếu ID/token trong bảng Pages' })));
       const anyOk=results.some(r=>r.ok), allOk=results.every(r=>r.ok);
       const firstOk=results.find(r=>r.ok);
       const logLine=results.map(r=>r.ok?`${r.name}: OK ${r.objectId}${r.cmtNote||''}`:`${r.name}: LỖI ${r.error}`).join(' | ');
+      // Bị Facebook khoá thì KHÔNG đếm vào NGƯNG: lỗi nằm ở phía Facebook, không
+      // ở dòng bài. Đếm vào đây thì tới ngày mở khoá dòng đã bị ngưng vĩnh viễn,
+      // phải bấm tay từng dòng mới đăng lại được.
+      const biKhoa = results.some(r=>r.khoaVideo);
+      const duoi = anyOk ? '' : biKhoa
+        ? ` ${NHAN_KHOA} Facebook đang tạm khoá đăng video trên page này (không phải lỗi bài). Kiểm tra: Meta Business Suite → Chất lượng tài khoản. Engine sẽ tự đăng lại khi Facebook mở khoá.`
+        : dauLanThu(logCu);
       await updateRow(tk,recId,{ [F.status]: anyOk?DONE:FAIL, ...(firstOk?{[F.linkPost]:{link:firstOk.permalink,text:'Xem bài'}}:{}),
-        [F.log]:`${now()} - ${allOk?'OK':'MỘT PHẦN'} - ${logLine}` + (anyOk?'':dauLanThu(logCu)) });
+        [F.log]:`${now()} - ${allOk?'OK':'MỘT PHẦN'} - ${logLine}` + duoi });
       if(anyOk) ok++; else err++;
     }catch(e){ const msg=String(e.message||e).slice(0,300); log(`     ✖ LỖI: ${msg}`);
       try{await updateRow(tk,recId,{[F.status]:FAIL,[F.log]:`${now()} - LỖI - ${msg}`+dauLanThu(logCu)});}catch{} err++;
     }finally{ tmp.forEach(p=>{try{fs.unlinkSync(p)}catch{}}); }
   }
-  log(`Xong. Đăng: ${ok}, Lỗi: ${err}, Chờ giờ: ${wait}, Giãn nhịp: ${gian}, Quá hạn: ${quaHan}, Đã ngưng: ${ngung}, Bỏ qua: ${skip}.`);
+  log(`Xong. Đăng: ${ok}, Lỗi: ${err}, Chờ giờ: ${wait}, Giãn nhịp: ${gian}, Quá hạn: ${quaHan}, Đã ngưng: ${ngung}, FB khoá video: ${khoa}, Bỏ qua: ${skip}.`);
 })().catch(e=>{console.error('FATAL',e.message||e);process.exit(1);});
