@@ -2,9 +2,15 @@
 # Không truyền RECORD_ID => quét cả bảng; giữ RESPECT_SCHEDULE mặc định (true) => chỉ đăng dòng đã tới giờ (hoặc không hẹn giờ).
 name: auto-dang-lich
 
+# ⛔ NGỪNG TỰ CHẠY từ 14/09/2026: việc đăng Facebook đã chuyển sang repo
+#    huyhinhanh2-ux/mentor-club-facebook (workflow dang-bai.yml — đồng hồ Cloudflare tho-mini-cron
+#    nhịp :00 bắn sang đó, nút Đăng trong Lark cũng gọi sang đó).
+#    Bỏ lịch ở đây để hai hệ không cùng quét bảng 14.3. Giữ workflow_dispatch làm đường LÙI:
+#    muốn quay về hệ cũ thì khôi phục 2 dòng schedule dưới đây + xoá GH_REPO_FB/GH_WF_FB trong
+#    wrangler.toml của tho-mini-cron rồi deploy lại.
+#      schedule:
+#        - cron: "*/15 * * * *"
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 # Không cho 2 lượt chạy chồng nhau (cron + nút bấm) → tránh đăng trùng.
